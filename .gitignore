@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/*.parquet
+.env
+server/.venv/
+server/__pycache__/
+*.pyc
+.DS_Store
+.claude/
