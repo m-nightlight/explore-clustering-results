@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -346,3 +347,58 @@ async def get_map_cluster_profiles(
         rows = await conn.fetch(query, ids)
 
     return reshape_profiles(rows)
+
+
+_SAFE_FIELD = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+@app.get("/api/filter-options")
+async def get_filter_options(request: Request):
+    """Return unique values for all low-cardinality sensor properties."""
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT domain_code, area, properties FROM sensors")
+
+    options: dict[str, set] = {}
+    for r in rows:
+        for col in ("domain_code", "area"):
+            if r[col] is not None:
+                options.setdefault(col, set()).add(r[col])
+        for k, v in (r["properties"] or {}).items():
+            if v is not None and not isinstance(v, (dict, list)):
+                options.setdefault(k, set()).add(str(v))
+
+    # Only fields with 2–100 unique values are useful as filters
+    return {k: sorted(v) for k, v in options.items() if 1 < len(v) <= 100}
+
+
+@app.get("/api/filtered-sensor-ids")
+async def get_filtered_sensor_ids(request: Request):
+    """Return sensor_ids matching all supplied field=value1,value2 filters."""
+    raw = {k: v for k, v in request.query_params.items() if v}
+    if not raw:
+        return {"sensor_ids": None}
+
+    conditions: list[str] = []
+    params: list = []
+
+    for field, values_str in raw.items():
+        if not _SAFE_FIELD.match(field):
+            raise HTTPException(400, f"Invalid field name: {field}")
+        values = [v for v in values_str.split(",") if v]
+        if not values:
+            continue
+        params.append(values)
+        idx = len(params)
+        if field in ("domain_code", "area"):
+            conditions.append(f"{field} = ANY(${idx}::text[])")
+        else:
+            conditions.append(f"properties->>'{field}' = ANY(${idx}::text[])")
+
+    if not conditions:
+        return {"sensor_ids": None}
+
+    query = "SELECT sensor_id FROM sensors WHERE " + " AND ".join(conditions)
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    return {"sensor_ids": [r["sensor_id"] for r in rows]}
