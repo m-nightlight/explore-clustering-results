@@ -291,20 +291,16 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
   const canvasRef = useRef();
 
   useEffect(() => {
-    if (!selectedK || selectedClusters.size === 0) return;
+    if (!selectedK) return;
     const controller = new AbortController();
     setProfilesLoading(true);
-    const params = new URLSearchParams({
-      cluster_col: selectedK,
-      clusters: [...selectedClusters].join(","),
-      agg: profileType,
-    });
+    const params = new URLSearchParams({ cluster_col: selectedK, agg: profileType });
     fetch(`${API}/api/cluster-profiles?${params}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((data) => { setProfiles(data); setProfilesLoading(false); })
       .catch((e) => { if (e.name !== "AbortError") setProfilesLoading(false); });
     return () => controller.abort();
-  }, [selectedK, selectedClusters, profileType]);
+  }, [selectedK, profileType]);
 
   // Draw with canvas for performance
   useEffect(() => {
@@ -326,11 +322,9 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
     ctx.fillStyle = "#0d1117";
     ctx.fillRect(0, 0, w, h);
 
-    // Gather all values for y scale (API returns string cluster IDs)
+    // Y scale uses ALL fetched profiles so toggling clusters doesn't rescale
     let allVals = [];
-    clusters.forEach((c) => {
-      const p = profiles.profiles[String(c)];
-      if (!selectedClusters.has(c) || !p) return;
+    Object.values(profiles.profiles).forEach((p) => {
       allVals.push(...p.values.filter((v) => v !== null));
       allVals.push(...p.q25.filter((v) => v !== null));
       allVals.push(...p.q75.filter((v) => v !== null));
@@ -456,25 +450,22 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
   const [sensorSearch, setSensorSearch] = useState("");
   const [overviewData, setOverviewData] = useState(null);
   const [sensorData, setSensorData] = useState(null);
-  const [drillMeans, setDrillMeans] = useState(null);
+  const [allDrillProfiles, setAllDrillProfiles] = useState(null);
   const [drillSensorData, setDrillSensorData] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
 
-  // Fetch cluster overview when selection changes
+  // Fetch cluster overview when cluster column changes (fetch all clusters for stable y scale)
   useEffect(() => {
-    if (!selectedK || selectedClusters.size === 0) return;
+    if (!selectedK) return;
     const controller = new AbortController();
     setOverviewLoading(true);
-    const params = new URLSearchParams({
-      cluster_col: selectedK,
-      clusters: [...selectedClusters].join(","),
-    });
+    const params = new URLSearchParams({ cluster_col: selectedK });
     fetch(`${API}/api/timeseries-overview?${params}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((data) => { setOverviewData(data); setOverviewLoading(false); })
       .catch((e) => { if (e.name !== "AbortError") setOverviewLoading(false); });
     return () => controller.abort();
-  }, [selectedK, selectedClusters]);
+  }, [selectedK]);
 
   // Fetch individual sensor data when selection changes
   useEffect(() => {
@@ -486,22 +477,22 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
       .catch(() => {});
   }, [selectedSensors]);
 
-  // Fetch drill-down data when drillClusters changes
+  // Fetch ALL cluster profiles for drill-down (for stable y scale)
   useEffect(() => {
-    if (drillClusters.size === 0) { setDrillMeans(null); setDrillSensorData(null); return; }
+    if (!selectedK) return;
     const controller = new AbortController();
-
-    // Cluster means for drill clusters
-    const params = new URLSearchParams({
-      cluster_col: selectedK,
-      clusters: [...drillClusters].join(","),
-    });
+    const params = new URLSearchParams({ cluster_col: selectedK });
     fetch(`${API}/api/cluster-profiles?${params}`, { signal: controller.signal })
       .then((r) => r.json())
-      .then(setDrillMeans)
+      .then(setAllDrillProfiles)
       .catch(() => {});
+    return () => controller.abort();
+  }, [selectedK]);
 
-    // Sample up to 200 individual sensors from the drill clusters
+  // Fetch individual sensor timeseries for selected drill clusters
+  useEffect(() => {
+    if (drillClusters.size === 0) { setDrillSensorData(null); return; }
+    const controller = new AbortController();
     const drillIds = sensorList
       .filter((s) => drillClusters.has(sensorClusterMap[s]))
       .slice(0, 200);
@@ -515,7 +506,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
         .catch(() => {});
     }
     return () => controller.abort();
-  }, [drillClusters, selectedK, sensorList, sensorClusterMap]);
+  }, [drillClusters, sensorList, sensorClusterMap]);
 
   const filteredSensors = useMemo(() => {
     if (!sensorSearch) return sensorList.slice(0, 100);
@@ -562,10 +553,10 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     const timestamps = overviewData.timestamps;
     const xScale = d3.scaleLinear().domain([0, timestamps.length - 1]).range([margin.left, margin.left + pw]);
 
+    // Y scale uses all fetched means so the axis stays stable when toggling clusters
     let allVals = [];
-    clusters.forEach((c) => {
-      const vals = overviewData.cluster_means[String(c)];
-      if (selectedClusters.has(c) && vals) allVals.push(...vals.filter((v) => v != null));
+    Object.values(overviewData.cluster_means).forEach((vals) => {
+      if (vals) allVals.push(...vals.filter((v) => v != null));
     });
     if (showIndividual && sensorData) {
       Object.values(sensorData.sensors).forEach((arr) => allVals.push(...arr.filter((v) => v != null)));
@@ -629,7 +620,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
 
   // Drill-down chart: fetched sensor lines + cluster means
   useEffect(() => {
-    if (!drillSensorData || !drillMeans || !drillCanvasRef.current || drillClusters.size === 0) return;
+    if (!drillSensorData || !allDrillProfiles || !drillCanvasRef.current || drillClusters.size === 0) return;
     const canvas = drillCanvasRef.current;
     const ctx = canvas.getContext("2d");
     const dpr = window.devicePixelRatio || 1;
@@ -647,12 +638,13 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     ctx.fillStyle = "#0d1117";
     ctx.fillRect(0, 0, w, h);
 
-    const timestamps = drillSensorData.timestamps;
+    const timestamps = allDrillProfiles.timestamps;
     const xScale = d3.scaleLinear().domain([0, timestamps.length - 1]).range([margin.left, margin.left + pw]);
 
+    // Y scale from ALL profiles (stable) + current sensor lines
     const allVals = [
+      ...Object.values(allDrillProfiles.profiles).flatMap((p) => p.values),
       ...Object.values(drillSensorData.sensors).flat(),
-      ...Object.values(drillMeans.profiles).flatMap((p) => p.values),
     ].filter((v) => v != null && !isNaN(v));
     if (allVals.length === 0) return;
 
@@ -690,9 +682,9 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
       ctx.stroke();
     });
 
-    // Cluster mean lines (dashed)
+    // Cluster mean lines (dashed) — only selected drill clusters
     [...drillClusters].forEach((clusterId) => {
-      const p = drillMeans.profiles[String(clusterId)];
+      const p = allDrillProfiles.profiles[String(clusterId)];
       if (!p) return;
       const ci = clusters.indexOf(clusterId);
       ctx.strokeStyle = getClusterColor(ci);
@@ -708,7 +700,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
       ctx.stroke();
       ctx.setLineDash([]);
     });
-  }, [drillSensorData, drillMeans, drillClusters, clusters, sensorClusterMap]);
+  }, [drillSensorData, allDrillProfiles, drillClusters, clusters, sensorClusterMap]);
 
   return (
     <div>
@@ -787,7 +779,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
         {drillClusters.size > 0 && (
           <>
             <p style={styles.mapInfo}>
-              {drillSensorData ? `${Object.keys(drillSensorData.sensors).length} sensors` : "Loading…"} — individual lines colored by cluster
+              {drillSensorData ? `${Object.keys(drillSensorData.sensors).length} sensors` : "Loading sensor lines…"} — individual lines colored by cluster, dashed = cluster mean
             </p>
             <canvas ref={drillCanvasRef} style={styles.canvas} width={900} height={420} />
           </>
@@ -799,9 +791,14 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
 
 // ─── Map View ────────────────────────────────────────────────────
 function BoundsTracker({ onChange }) {
+  const timerRef = useRef(null);
+  const update = useCallback((map) => {
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => onChange(map.getBounds()), 150);
+  }, [onChange]);
   useMapEvents({
-    moveend: (e) => onChange(e.target.getBounds()),
-    zoomend: (e) => onChange(e.target.getBounds()),
+    moveend: (e) => update(e.target),
+    zoomend: (e) => update(e.target),
   });
   return null;
 }
@@ -957,7 +954,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           </button>
         </div>
         <div style={{ height: 560, borderRadius: 8, overflow: "hidden", border: "1px solid #21262d" }}>
-          <MapContainer center={center} zoom={7} style={{ height: "100%", width: "100%" }}>
+          <MapContainer preferCanvas center={center} zoom={7} style={{ height: "100%", width: "100%" }}>
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

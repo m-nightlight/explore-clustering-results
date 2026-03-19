@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 CREATE EXTENSION IF NOT EXISTS postgis CASCADE;
 
 CREATE TABLE IF NOT EXISTS sensors (
@@ -27,17 +26,5 @@ CREATE TABLE IF NOT EXISTS temperatures (
     temperature DOUBLE PRECISION
 );
 
-SELECT create_hypertable(
-    'temperatures', 'ts',
-    chunk_time_interval => INTERVAL '1 day',
-    if_not_exists => TRUE
-);
-
 CREATE INDEX IF NOT EXISTS idx_temp_sensor ON temperatures (sensor_id, ts DESC);
-
--- Compression: beneficial once data is loaded
-ALTER TABLE temperatures SET (
-    timescaledb.compress,
-    timescaledb.compress_orderby     = 'ts DESC',
-    timescaledb.compress_segmentby   = 'sensor_id'
-);
+CREATE INDEX IF NOT EXISTS idx_temp_ts     ON temperatures (ts DESC);

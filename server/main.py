@@ -5,9 +5,19 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/sensor_explorer")
+
+def _parse_dsn_for_asyncpg(url: str):
+    """Strip params asyncpg doesn't understand (e.g. gssencmode) from the DSN."""
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    p = urlparse(url)
+    qs = parse_qs(p.query, keep_blank_values=True)
+    qs.pop("gssencmode", None)
+    new_query = urlencode({k: v[0] for k, v in qs.items()})
+    return urlunparse(p._replace(query=new_query))
 
 # Whitelist prevents SQL injection when interpolating column name
 CLUSTER_COLS = {
@@ -25,13 +35,14 @@ async def init_conn(conn):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = await asyncpg.create_pool(DATABASE_URL, init=init_conn)
+    app.state.pool = await asyncpg.create_pool(_parse_dsn_for_asyncpg(DATABASE_URL), init=init_conn)
     yield
     await app.state.pool.close()
 
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -106,12 +117,13 @@ async def health(request: Request):
 
 @app.get("/api/metadata")
 async def get_metadata(request: Request):
+    """Slim metadata — cluster assignments + location only (no JSONB properties)."""
     async with request.app.state.pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT sensor_id, lat, lon,
                    stage1_cluster, stage2_subcluster, cluster,
-                   domain_code, area, properties
+                   domain_code, area
             FROM sensors
             ORDER BY sensor_id
             """
@@ -126,10 +138,22 @@ async def get_metadata(request: Request):
             "cluster":           r["cluster"],
             "domain_code":       r["domain_code"],
             "area":              r["area"],
-            **(r["properties"] or {}),
         }
         for r in rows
     ]
+
+
+@app.get("/api/sensor-properties")
+async def get_sensor_properties(request: Request, sensor_id: str = Query(...)):
+    """Full JSONB properties for a single sensor (on-demand)."""
+    async with request.app.state.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT sensor_id, properties FROM sensors WHERE sensor_id = $1",
+            sensor_id,
+        )
+    if not row:
+        raise HTTPException(404, "Sensor not found")
+    return {"sensor_id": row["sensor_id"], **(row["properties"] or {})}
 
 
 @app.get("/api/cluster-profiles")
@@ -142,30 +166,41 @@ async def get_cluster_profiles(
     col          = validated_col(cluster_col)
     cluster_list = parse_clusters(clusters)
 
-    if agg == "median":
-        agg_expr = "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t.temperature)"
-    else:
-        agg_expr = "AVG(t.temperature)"
+    # Use materialized view for mean (fast); fall back to live query only for median
+    if agg != "median":
+        where = "WHERE cluster_col = $1"
+        params: list = [col]
+        if cluster_list:
+            where += " AND cluster_id = ANY($2::text[])"
+            params.append([str(c) for c in cluster_list])
+        query = f"""
+            SELECT ts, cluster_id, val, q25, q75, sensor_count
+            FROM mv_cluster_profiles
+            {where}
+            ORDER BY ts, cluster_id
+        """
+        async with request.app.state.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        return reshape_profiles(rows)
 
-    # col is from a whitelist — safe to interpolate
+    # Median — live query
+    where_live = f"WHERE s.{col} = ANY($1::smallint[])" if cluster_list else ""
     query = f"""
         SELECT
             t.ts,
             s.{col}::text                                               AS cluster_id,
-            {agg_expr}                                                  AS val,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t.temperature)  AS val,
             PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY t.temperature) AS q25,
             PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY t.temperature) AS q75,
             COUNT(DISTINCT t.sensor_id)                                 AS sensor_count
         FROM temperatures t
         JOIN sensors s USING (sensor_id)
-        {"WHERE s." + col + " = ANY($1::smallint[])" if cluster_list else ""}
+        {where_live}
         GROUP BY t.ts, s.{col}
         ORDER BY t.ts, s.{col}
     """
-
     async with request.app.state.pool.acquire() as conn:
         rows = await conn.fetch(query, *([cluster_list] if cluster_list else []))
-
     return reshape_profiles(rows)
 
 
@@ -175,24 +210,25 @@ async def get_timeseries_overview(
     cluster_col: str = Query("cluster"),
     clusters:    str = Query(None),
 ):
-    """Cluster means only — lighter version of cluster-profiles for the main chart."""
+    """Cluster means only — from materialized view."""
     col          = validated_col(cluster_col)
     cluster_list = parse_clusters(clusters)
 
+    where = "WHERE cluster_col = $1"
+    params: list = [col]
+    if cluster_list:
+        where += " AND cluster_id = ANY($2::text[])"
+        params.append([str(c) for c in cluster_list])
+
     query = f"""
-        SELECT
-            t.ts,
-            s.{col}::text       AS cluster_id,
-            AVG(t.temperature)  AS val
-        FROM temperatures t
-        JOIN sensors s USING (sensor_id)
-        {"WHERE s." + col + " = ANY($1::smallint[])" if cluster_list else ""}
-        GROUP BY t.ts, s.{col}
-        ORDER BY t.ts, s.{col}
+        SELECT ts, cluster_id, val
+        FROM mv_cluster_profiles
+        {where}
+        ORDER BY ts, cluster_id
     """
 
     async with request.app.state.pool.acquire() as conn:
-        rows = await conn.fetch(query, *([cluster_list] if cluster_list else []))
+        rows = await conn.fetch(query, *params)
 
     timestamps: list[str] = []
     seen_ts: set[str]     = set()
@@ -253,6 +289,7 @@ async def get_sensors_in_bbox(
     north: float = Query(...),
     east:  float = Query(...),
     cluster_col: str = Query("cluster"),
+    limit: int = Query(5000),
 ):
     col = validated_col(cluster_col)
 
@@ -264,8 +301,9 @@ async def get_sensors_in_bbox(
             FROM sensors
             WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
             ORDER BY sensor_id
+            LIMIT $5
             """,
-            west, south, east, north,
+            west, south, east, north, limit,
         )
 
     sensors     = [dict(r) for r in rows]
@@ -274,7 +312,7 @@ async def get_sensors_in_bbox(
         cid = str(s[cluster_col])
         counts[cid] = counts.get(cid, 0) + 1
 
-    return {"sensors": sensors, "cluster_counts": counts}
+    return {"sensors": sensors, "cluster_counts": counts, "truncated": len(rows) == limit}
 
 
 @app.get("/api/map-cluster-profiles")
