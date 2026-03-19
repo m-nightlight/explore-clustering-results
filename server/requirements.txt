@@ -1,4 +1,7 @@
 fastapi
 uvicorn[standard]
+asyncpg
+psycopg2-binary
 duckdb
 pandas
+pyarrow
