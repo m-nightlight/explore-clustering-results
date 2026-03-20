@@ -1067,6 +1067,13 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     );
   }, [selectedBuildings, sensorProperties]);
 
+  // Sensor properties filtered to selected building (drives stats + profiles when building active)
+  const activeSensorProperties = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return sensorProperties;
+    if (selectedBuildings.size === 0) return sensorProperties;
+    return sensorProperties.filter((s) => selectedBuildings.has(s["lm_building_id"] || "Unknown"));
+  }, [sensorProperties, selectedBuildings]);
+
   // ── deck.gl layers ──
   const layers = useMemo(() => {
     const ls = [
@@ -1217,9 +1224,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   }, [sensorProperties]);
 
   const floorData = useMemo(() => {
-    if (!Array.isArray(sensorProperties)) return null;
+    if (!Array.isArray(activeSensorProperties)) return null;
     const counts = {};
-    sensorProperties.forEach((s) => {
+    activeSensorProperties.forEach((s) => {
       const f = s["floor_df1"];
       if (f == null || isNaN(f)) return;
       const lbl = String(Math.round(f));
@@ -1229,12 +1236,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
     const labels = Object.keys(counts).map(Number).sort((a, b) => a - b).map(String);
     return { labels, counts };
-  }, [sensorProperties, selectedK]);
+  }, [activeSensorProperties, selectedK]);
 
   const yearData = useMemo(() => {
-    if (!Array.isArray(sensorProperties)) return null;
+    if (!Array.isArray(activeSensorProperties)) return null;
     const counts = {};
-    sensorProperties.forEach((s) => {
+    activeSensorProperties.forEach((s) => {
       const y = s["Nybyggnadsår"];
       if (y == null || isNaN(y) || y < 1800 || y > 2100) return;
       const bin = String(Math.floor(y / 5) * 5);
@@ -1244,12 +1251,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
     const labels = Object.keys(counts).sort();
     return labels.length ? { labels, counts } : null;
-  }, [sensorProperties, selectedK]);
+  }, [activeSensorProperties, selectedK]);
 
   const periodData = useMemo(() => {
-    if (!Array.isArray(sensorProperties)) return null;
+    if (!Array.isArray(activeSensorProperties)) return null;
     const counts = {};
-    sensorProperties.forEach((s) => {
+    activeSensorProperties.forEach((s) => {
       const p = s["construction_period"];
       if (!p) return;
       const cid = String(s[selectedK]);
@@ -1258,12 +1265,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
     const labels = Object.keys(counts).sort();
     return { labels, counts };
-  }, [sensorProperties, selectedK]);
+  }, [activeSensorProperties, selectedK]);
 
   const buildingTypeData = useMemo(() => {
-    if (!Array.isArray(sensorProperties)) return null;
+    if (!Array.isArray(activeSensorProperties)) return null;
     const counts = {};
-    sensorProperties.forEach((s) => {
+    activeSensorProperties.forEach((s) => {
       const t = s["andamal_typ"];
       if (!t) return;
       const cid = String(s[selectedK]);
@@ -1274,7 +1281,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       Object.values(counts[b]).reduce((s, n) => s + n, 0) - Object.values(counts[a]).reduce((s, n) => s + n, 0)
     );
     return { labels, counts };
-  }, [sensorProperties, selectedK]);
+  }, [activeSensorProperties, selectedK]);
 
   useEffect(() => {
     if (!allClusterProfiles || !analysedSensors || !canvasRef.current) return;
@@ -1296,15 +1303,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart]);
 
   useEffect(() => {
-    if (!allClusterProfiles || !mapSensorData || !sensorCanvasRef.current) return;
+    const activeSensorData = buildingTimeseries || mapSensorData;
+    if (!allClusterProfiles || !activeSensorData || !sensorCanvasRef.current) return;
     const ts = allClusterProfiles.timestamps; if (!ts.length) return;
     const viewProfiles = Object.fromEntries(
       Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
     );
-    const yVals = [...Object.values(viewProfiles).flatMap((p) => p.values), ...Object.values(mapSensorData.sensors).flat()].filter((v) => v != null && !isNaN(v));
+    const yVals = [...Object.values(viewProfiles).flatMap((p) => p.values), ...Object.values(activeSensorData.sensors).flat()].filter((v) => v != null && !isNaN(v));
     if (!yVals.length) return;
     drawChart(sensorCanvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
-      Object.entries(mapSensorData.sensors).forEach(([sid, vals]) => {
+      Object.entries(activeSensorData.sensors).forEach(([sid, vals]) => {
         const sensor = analysedSensors?.find((d) => d.id === sid);
         const ci = sensor ? clusters.indexOf(sensor.cluster) : -1;
         ctx.strokeStyle = (ci >= 0 ? getClusterColor(ci) : "#888") + "40"; ctx.lineWidth = 1; ctx.beginPath();
@@ -1320,7 +1328,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         ctx.stroke();
       });
     });
-  }, [allClusterProfiles, mapSensorData, viewClusterIds, clusters, analysedSensors, drawChart]);
+  }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -1566,13 +1574,26 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             {/* ── Profiles tab ── */}
             {analysisTab === "profiles" && (
               <>
+                {selectedBuildings.size > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", background: "#1f6feb22", border: "1px solid #58a6ff55", borderRadius: 6 }}>
+                    <span style={{ fontSize: 11, color: "#58a6ff", flex: 1 }}>
+                      ⬡ {[...selectedBuildings].join(", ")}
+                    </span>
+                    <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>
+                      Clear
+                    </button>
+                  </div>
+                )}
                 {mapProfilesLoading && <p style={styles.mapInfo}>Loading sensors…</p>}
                 {allClusterProfiles && viewClusterIds.size > 0 && (
                   <>
                     <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
                     <canvas ref={canvasRef} style={{ ...styles.canvas, height: 200 }} />
                     <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
-                      {mapSensorData ? `${Object.keys(mapSensorData.sensors).length} sensors` : "Loading…"} + cluster means
+                      {buildingTimeseries
+                        ? `${Object.keys(buildingTimeseries.sensors).length} sensors (building)`
+                        : mapSensorData ? `${Object.keys(mapSensorData.sensors).length} sensors` : "Loading…"
+                      } + cluster means
                     </p>
                     <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 200 }} />
                   </>
@@ -1586,6 +1607,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 {!sensorProperties && <p style={styles.mapInfo}>Loading properties…</p>}
                 {sensorProperties && (
                   <>
+                    {selectedBuildings.size > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", background: "#1f6feb22", border: "1px solid #58a6ff55", borderRadius: 6 }}>
+                        <span style={{ fontSize: 11, color: "#58a6ff", flex: 1 }}>⬡ {[...selectedBuildings].join(", ")}</span>
+                        <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>Clear</button>
+                      </div>
+                    )}
                     {/* Cluster legend */}
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
                       {[...viewClusterIds].sort().map((cid) => {
