@@ -336,7 +336,7 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
     const ph = h - margin.top - margin.bottom;
 
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#1a1f2e";
     ctx.fillRect(0, 0, w, h);
 
     // Y scale uses ALL fetched profiles so toggling clusters doesn't rescale
@@ -354,7 +354,7 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
 
     // Grid lines
-    ctx.strokeStyle = "#1a2030";
+    ctx.strokeStyle = "#252c3d";
     ctx.lineWidth = 1;
     const yTicks = yScale.ticks(6);
     yTicks.forEach((t) => {
@@ -564,7 +564,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     const ph = h - margin.top - margin.bottom;
 
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#1a1f2e";
     ctx.fillRect(0, 0, w, h);
 
     const timestamps = overviewData.timestamps;
@@ -584,7 +584,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     const yPad = (yExtent[1] - yExtent[0]) * 0.05 || 1;
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
 
-    ctx.strokeStyle = "#1a2030";
+    ctx.strokeStyle = "#252c3d";
     ctx.lineWidth = 1;
     yScale.ticks(6).forEach((t) => {
       ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke();
@@ -652,7 +652,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     const ph = h - margin.top - margin.bottom;
 
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#1a1f2e";
     ctx.fillRect(0, 0, w, h);
 
     const timestamps = allDrillProfiles.timestamps;
@@ -669,7 +669,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     const yPad = (yExtent[1] - yExtent[0]) * 0.05 || 1;
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
 
-    ctx.strokeStyle = "#1a2030";
+    ctx.strokeStyle = "#252c3d";
     ctx.lineWidth = 1;
     yScale.ticks(6).forEach((t) => {
       ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke();
@@ -772,7 +772,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
       )}
 
       {/* ── Chart 2: Cluster drill-down ── */}
-      <div style={{ marginTop: 32, borderTop: "1px solid #21262d", paddingTop: 20 }}>
+      <div style={{ marginTop: 32, borderTop: "1px solid #2e3440", paddingTop: 20 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
           <span style={styles.toolLabel}>Cluster drill-down:</span>
           {clusters.map((c, i) => (
@@ -815,7 +815,7 @@ function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClus
   canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
   const margin = { top: 22, right: 16, bottom: rotateLabels ? 72 : 32, left: 36 };
   const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
-  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, w, h);
+  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
 
   const viewCids = [...viewClusterIds].sort();
   const totals = labels.map((l) => viewCids.reduce((s, cid) => s + ((counts[l] || {})[cid] || 0), 0));
@@ -824,7 +824,7 @@ function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClus
   const barW = Math.max(4, pw / labels.length - gap);
 
   // Grid lines
-  ctx.strokeStyle = "#1a2030"; ctx.lineWidth = 1;
+  ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
   [0.25, 0.5, 0.75, 1].forEach((pct) => {
     const y = margin.top + ph * (1 - pct);
     ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + pw, y); ctx.stroke();
@@ -873,7 +873,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
 
   const margin = { top: 22, right: 16, bottom: 36, left: 36 };
   const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
-  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, w, h);
+  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
 
   const yMin = Math.floor(Math.min(...allYears) / 10) * 10 - 5;
   const yMax = Math.ceil(Math.max(...allYears) / 10) * 10 + 5;
@@ -895,7 +895,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
   const yScale = d3.scaleLinear().domain([0, maxDensity * 1.1]).range([margin.top + ph, margin.top]);
 
   // Grid
-  ctx.strokeStyle = "#1a2030"; ctx.lineWidth = 1;
+  ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
   yScale.ticks(4).forEach((t) => {
     ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke();
   });
@@ -1082,10 +1082,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             : 210;
           return [...color, alpha];
         },
-        getRadius: (d) => buildingHighlightIds?.has(d.id) ? 2 : 1,
+        getRadius: (d) => buildingHighlightIds?.has(d.id) ? 5 : 1,
         radiusUnits: "pixels",
-        radiusMinPixels: buildingHighlightIds ? 1 : 2,
-        radiusMaxPixels: 10,
+        radiusMinPixels: buildingHighlightIds ? 3 : 2,
+        radiusMaxPixels: buildingHighlightIds ? 14 : 8,
         pickable: true,
         updateTriggers: { getFillColor: [clusters, buildingHighlightIds], getRadius: [buildingHighlightIds] },
       }),
@@ -1183,12 +1183,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
     const margin = { top: 16, right: 20, bottom: 44, left: 52 };
     const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
-    ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
     const xScale = d3.scaleLinear().domain([0, timestamps.length - 1]).range([margin.left, margin.left + pw]);
     const yExtent = d3.extent(yVals);
     const yPad = (yExtent[1] - yExtent[0]) * 0.05 || 1;
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
-    ctx.strokeStyle = "#1a2030"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
     yScale.ticks(5).forEach((t) => { ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke(); });
     ctx.fillStyle = "#667"; ctx.font = "10px monospace"; ctx.textAlign = "right";
     yScale.ticks(5).forEach((t) => ctx.fillText(t.toFixed(1), margin.left - 6, yScale(t) + 3));
@@ -1233,16 +1233,17 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
   const yearData = useMemo(() => {
     if (!Array.isArray(sensorProperties)) return null;
-    const byCluster = {};
+    const counts = {};
     sensorProperties.forEach((s) => {
       const y = s["Nybyggnadsår"];
+      if (y == null || isNaN(y) || y < 1800 || y > 2100) return;
+      const bin = String(Math.floor(y / 5) * 5);
       const cid = String(s[selectedK]);
-      if (y != null && !isNaN(y) && y > 1800 && y < 2100) {
-        if (!byCluster[cid]) byCluster[cid] = [];
-        byCluster[cid].push(y);
-      }
+      if (!counts[bin]) counts[bin] = {};
+      counts[bin][cid] = (counts[bin][cid] || 0) + 1;
     });
-    return Object.keys(byCluster).length ? byCluster : null;
+    const labels = Object.keys(counts).sort();
+    return labels.length ? { labels, counts } : null;
   }, [sensorProperties, selectedK]);
 
   const periodData = useMemo(() => {
@@ -1373,7 +1374,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
   // ── Stats charts (floor / year / period / building type) ──
   useEffect(() => { if (floorData && floorCanvasRef.current && analysisTab === "stats") renderStackedBars(floorCanvasRef.current, floorData, "Floor level (floor_df1)", clusters, viewClusterIds); }, [floorData, clusters, viewClusterIds, analysisTab]);
-  useEffect(() => { if (yearData && yearCanvasRef.current && analysisTab === "stats") renderYearDensity(yearCanvasRef.current, yearData, clusters, viewClusterIds); }, [yearData, clusters, viewClusterIds, analysisTab]);
+  useEffect(() => { if (yearData && yearCanvasRef.current && analysisTab === "stats") renderStackedBars(yearCanvasRef.current, yearData, "Construction year (Nybyggnadsår)", clusters, viewClusterIds, true); }, [yearData, clusters, viewClusterIds, analysisTab]);
   useEffect(() => { if (periodData && periodCanvasRef.current && analysisTab === "stats") renderStackedBars(periodCanvasRef.current, periodData, "Construction period", clusters, viewClusterIds, true); }, [periodData, clusters, viewClusterIds, analysisTab]);
   useEffect(() => { if (buildingTypeData && typeCanvasRef.current && analysisTab === "stats") renderStackedBars(typeCanvasRef.current, buildingTypeData, "Building type (andamal_typ)", clusters, viewClusterIds, true); }, [buildingTypeData, clusters, viewClusterIds, analysisTab]);
 
@@ -1391,21 +1392,46 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     ].filter((v) => v != null && !isNaN(v));
     if (!yVals.length) return;
     drawChart(buildingCanvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
+      // Group sensors by cluster and draw together so same-cluster lines are visually grouped
+      const byCid = {};
       Object.entries(buildingTimeseries.sensors).forEach(([sid, vals]) => {
         const s = sensorProperties?.find((p) => p.sensor_id === sid);
         const ci = s ? clusters.indexOf(s[selectedK]) : -1;
-        ctx.strokeStyle = (ci >= 0 ? getClusterColor(ci) : "#888") + "50";
-        ctx.lineWidth = 1; ctx.beginPath();
-        let started = false;
-        vals.forEach((v, i) => { if (v == null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
-        ctx.stroke();
+        const cid = ci >= 0 ? String(s[selectedK]) : "__unknown";
+        if (!byCid[cid]) byCid[cid] = { ci, lines: [] };
+        byCid[cid].lines.push(vals);
       });
+      Object.entries(byCid).forEach(([, { ci, lines }]) => {
+        const color = getClusterColor(ci >= 0 ? ci : 0);
+        const [r, g, b] = hexToRgb(color);
+        ctx.strokeStyle = `rgba(${r},${g},${b},0.65)`;
+        ctx.lineWidth = 1.5;
+        lines.forEach((vals) => {
+          ctx.beginPath();
+          let started = false;
+          vals.forEach((v, i) => { if (v == null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+          ctx.stroke();
+        });
+      });
+      // Cluster mean lines on top — thick + dashed
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
-        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0); ctx.lineWidth = 2.5; ctx.beginPath();
+        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0);
+        ctx.lineWidth = 2.5; ctx.setLineDash([8, 3]); ctx.beginPath();
         let started = false;
         p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
-        ctx.stroke();
+        ctx.stroke(); ctx.setLineDash([]);
+      });
+      // Legend
+      const margin = { top: 16, left: 52 };
+      let lx = margin.left, ly = margin.top;
+      Object.entries(byCid).forEach(([cid, { ci }]) => {
+        if (cid === "__unknown") return;
+        const color = getClusterColor(ci >= 0 ? ci : 0);
+        ctx.fillStyle = color; ctx.fillRect(lx, ly, 10, 10);
+        ctx.fillStyle = "#ccc"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+        ctx.fillText(`Cluster ${cid}`, lx + 14, ly + 9);
+        lx += ctx.measureText(`Cluster ${cid}`).width + 28;
       });
     });
   }, [buildingTimeseries, allClusterProfiles, viewClusterIds, clusters, sensorProperties, selectedK, analysisTab, drawChart]);
@@ -1419,10 +1445,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         {/* Toolbar */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
           <p style={{ ...styles.mapInfo, margin: 0 }}>{sensorLocations.length.toLocaleString()} sensors • {visibleSensors.length.toLocaleString()} in view</p>
-          <button onClick={() => setFiltersOpen((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: activeFilterCount > 0 ? "#2a9d8f" : "#30363d", color: activeFilterCount > 0 ? "#2a9d8f" : "#8b949e", background: activeFilterCount > 0 ? "#2a9d8f22" : "none" }}>
+          <button onClick={() => setFiltersOpen((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: activeFilterCount > 0 ? "#2a9d8f" : "#3d4555", color: activeFilterCount > 0 ? "#2a9d8f" : "#8b949e", background: activeFilterCount > 0 ? "#2a9d8f22" : "none" }}>
             ⧉ Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
-          <button onClick={() => setBoxZoomActive((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: boxZoomActive ? "#f4a261" : "#30363d", color: boxZoomActive ? "#f4a261" : "#8b949e", background: boxZoomActive ? "#f4a26122" : "none" }}>
+          <button onClick={() => setBoxZoomActive((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: boxZoomActive ? "#f4a261" : "#3d4555", color: boxZoomActive ? "#f4a261" : "#8b949e", background: boxZoomActive ? "#f4a26122" : "none" }}>
             ⬚ Box zoom
           </button>
           <button onClick={analyseView} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#457B9D", color: "#457B9D" }}>
@@ -1439,7 +1465,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
         {/* Filter panel */}
         {filtersOpen && filterOptions && (
-          <div style={{ marginBottom: 8, padding: "10px 12px", background: "#161b22", border: "1px solid #21262d", borderRadius: 8 }}>
+          <div style={{ marginBottom: 8, padding: "10px 12px", background: "#232936", border: "1px solid #2e3440", borderRadius: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: "#8b949e", textTransform: "uppercase", letterSpacing: "0.5px" }}>Filter sensors</span>
               {activeFilterCount > 0 && <button onClick={clearFilters} style={{ ...styles.miniBtn, fontSize: 10, color: "#f85149", borderColor: "#f85149" }}>Clear all</button>}
@@ -1452,7 +1478,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                     {values.map((v) => {
                       const active = activeFilters[field]?.has(String(v));
                       return (
-                        <button key={v} onClick={() => toggleFilterValue(field, String(v))} style={{ ...styles.sensorChip, fontSize: 10, padding: "2px 8px", backgroundColor: active ? "#2a9d8f33" : "transparent", borderColor: active ? "#2a9d8f" : "#30363d", color: active ? "#2a9d8f" : "#8b949e" }}>
+                        <button key={v} onClick={() => toggleFilterValue(field, String(v))} style={{ ...styles.sensorChip, fontSize: 10, padding: "2px 8px", backgroundColor: active ? "#2a9d8f33" : "transparent", borderColor: active ? "#2a9d8f" : "#3d4555", color: active ? "#2a9d8f" : "#8b949e" }}>
                           {v}
                         </button>
                       );
@@ -1465,7 +1491,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         )}
 
         {/* DeckGL map */}
-        <div ref={deckContainerRef} style={{ height: 560, borderRadius: 8, overflow: "hidden", border: "1px solid #21262d", position: "relative" }}>
+        <div ref={deckContainerRef} style={{ height: 560, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440", position: "relative" }}>
           <DeckGL
             viewState={viewState}
             controller={!boxZoomActive}
@@ -1474,7 +1500,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             glOptions={{ webgl2: true }}
             getTooltip={({ object }) => object && {
               html: `<strong style="color:#e0e0e0">${object.id}</strong><br/><span style="color:#8b949e">Cluster: ${object.cluster}</span>`,
-              style: { background: "#1c2128", border: "1px solid #30363d", borderRadius: "6px", padding: "8px 12px", fontSize: "12px", fontFamily: "monospace" },
+              style: { background: "#2a303d", border: "1px solid #3d4555", borderRadius: "6px", padding: "8px 12px", fontSize: "12px", fontFamily: "monospace" },
             }}
           >
             <Map key={mapStyleId} ref={mapRef} mapStyle={resolveStyle(MAP_STYLES.find(s => s.id === mapStyleId).url)} mapboxAccessToken={MAPBOX_TOKEN} />
@@ -1515,7 +1541,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 return (
                   <div key={c} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ color: getClusterColor(i), fontSize: 11, fontWeight: 600, width: 70, flexShrink: 0 }}>Cluster {c}</span>
-                    <div style={{ flex: 1, background: "#161b22", borderRadius: 4, height: 10, overflow: "hidden" }}>
+                    <div style={{ flex: 1, background: "#232936", borderRadius: 4, height: 10, overflow: "hidden" }}>
                       <div style={{ width: `${pct * 100}%`, height: "100%", background: getClusterColor(i), borderRadius: 4 }} />
                     </div>
                     <span style={{ fontSize: 11, color: "#8b949e", width: 36, textAlign: "right", flexShrink: 0 }}>{count}</span>
@@ -1525,7 +1551,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             </div>
 
             {/* Analysis tabs */}
-            <div style={{ display: "flex", gap: 4, borderBottom: "1px solid #21262d", paddingBottom: 0 }}>
+            <div style={{ display: "flex", gap: 4, borderBottom: "1px solid #2e3440", paddingBottom: 0 }}>
               {[["profiles", "Profiles"], ["stats", "Stats"], ["buildings", "Buildings"]].map(([id, label]) => (
                 <button key={id} onClick={() => setAnalysisTab(id)} style={{
                   background: "none", border: "none", borderBottom: analysisTab === id ? "2px solid #58a6ff" : "2px solid transparent",
@@ -1619,7 +1645,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                                 display: "flex", alignItems: "center", gap: 8, padding: "5px 8px",
                                 borderRadius: 5, cursor: "pointer", fontSize: 11,
                                 background: selected ? "#1f6feb22" : "transparent",
-                                border: `1px solid ${selected ? "#58a6ff" : "#21262d"}`,
+                                border: `1px solid ${selected ? "#58a6ff" : "#2e3440"}`,
                               }}
                             >
                               <span style={{ flex: 1, color: selected ? "#58a6ff" : "#c9d1d9", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
@@ -1855,14 +1881,14 @@ function computeEntropy(labels, uniqueLabels) {
 const styles = {
   container: {
     fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', monospace",
-    backgroundColor: "#0d1117",
+    backgroundColor: "#1a1f2e",
     color: "#e0e0e0",
     minHeight: "100vh",
     padding: 0,
   },
   header: {
-    background: "linear-gradient(135deg, #0d1117 0%, #161b22 100%)",
-    borderBottom: "1px solid #21262d",
+    background: "linear-gradient(135deg, #1a1f2e 0%, #232936 100%)",
+    borderBottom: "1px solid #2e3440",
     padding: "20px 24px",
   },
   headerInner: {
@@ -1898,8 +1924,8 @@ const styles = {
     letterSpacing: "0.5px",
   },
   select: {
-    background: "#161b22",
-    border: "1px solid #30363d",
+    background: "#232936",
+    border: "1px solid #3d4555",
     color: "#e0e0e0",
     padding: "6px 12px",
     borderRadius: 6,
@@ -1921,8 +1947,8 @@ const styles = {
   retryBtn: {
     marginTop: 12,
     padding: "8px 20px",
-    background: "#21262d",
-    border: "1px solid #30363d",
+    background: "#2e3440",
+    border: "1px solid #3d4555",
     borderRadius: 6,
     color: "#e6edf3",
     cursor: "pointer",
@@ -1940,7 +1966,7 @@ const styles = {
   },
   tabBar: {
     display: "flex",
-    borderBottom: "1px solid #21262d",
+    borderBottom: "1px solid #2e3440",
     padding: "0 24px",
     gap: 0,
     overflowX: "auto",
@@ -1970,8 +1996,8 @@ const styles = {
   },
   clusterBar: {
     padding: "12px 24px",
-    borderBottom: "1px solid #21262d",
-    background: "#161b2288",
+    borderBottom: "1px solid #2e3440",
+    background: "#23293688",
   },
   clusterBarHeader: {
     display: "flex",
@@ -1988,7 +2014,7 @@ const styles = {
   },
   miniBtn: {
     background: "none",
-    border: "1px solid #30363d",
+    border: "1px solid #3d4555",
     color: "#8b949e",
     padding: "2px 8px",
     borderRadius: 4,
@@ -2032,8 +2058,8 @@ const styles = {
     letterSpacing: "0.5px",
   },
   toolBtn: {
-    background: "#161b22",
-    border: "1px solid #30363d",
+    background: "#232936",
+    border: "1px solid #3d4555",
     color: "#8b949e",
     padding: "5px 14px",
     borderRadius: 6,
@@ -2051,7 +2077,7 @@ const styles = {
     width: "100%",
     height: 420,
     borderRadius: 8,
-    border: "1px solid #21262d",
+    border: "1px solid #2e3440",
     display: "block",
   },
   emptyState: {
@@ -2083,15 +2109,15 @@ const styles = {
   sensorPicker: {
     marginTop: 16,
     padding: 16,
-    border: "1px solid #21262d",
+    border: "1px solid #2e3440",
     borderRadius: 8,
-    background: "#161b22",
+    background: "#232936",
   },
   searchInput: {
     width: "100%",
     padding: "8px 12px",
-    background: "#0d1117",
-    border: "1px solid #30363d",
+    background: "#1a1f2e",
+    border: "1px solid #3d4555",
     borderRadius: 6,
     color: "#e0e0e0",
     fontFamily: "inherit",
@@ -2107,7 +2133,7 @@ const styles = {
     overflowY: "auto",
   },
   sensorChip: {
-    border: "1px solid #30363d",
+    border: "1px solid #3d4555",
     borderRadius: 4,
     padding: "2px 8px",
     fontSize: 11,
@@ -2133,7 +2159,7 @@ const styles = {
     textAlign: "left",
     fontSize: 10,
     color: "#8b949e",
-    borderBottom: "1px solid #21262d",
+    borderBottom: "1px solid #2e3440",
     textTransform: "uppercase",
     letterSpacing: "0.4px",
     whiteSpace: "nowrap",
@@ -2142,13 +2168,13 @@ const styles = {
     padding: "3px 8px",
     fontSize: 11,
     color: "#c9d1d9",
-    borderBottom: "1px solid #161b22",
+    borderBottom: "1px solid #232936",
     whiteSpace: "nowrap",
   },
   tooltip: {
     position: "absolute",
-    background: "#1c2128",
-    border: "1px solid #30363d",
+    background: "#2a303d",
+    border: "1px solid #3d4555",
     borderRadius: 6,
     padding: "8px 12px",
     fontSize: 12,
@@ -2160,9 +2186,9 @@ const styles = {
   },
   rfConfig: {
     padding: 20,
-    border: "1px solid #21262d",
+    border: "1px solid #2e3440",
     borderRadius: 8,
-    background: "#161b22",
+    background: "#232936",
     marginBottom: 20,
   },
   rfTitle: {
@@ -2188,9 +2214,9 @@ const styles = {
     color: "#c9d1d9",
     cursor: "pointer",
     padding: "4px 10px",
-    background: "#0d1117",
+    background: "#1a1f2e",
     borderRadius: 6,
-    border: "1px solid #21262d",
+    border: "1px solid #2e3440",
   },
   runBtn: {
     background: "linear-gradient(135deg, #238636 0%, #2ea043 100%)",
@@ -2211,10 +2237,10 @@ const styles = {
     fontStyle: "italic",
   },
   rfResults: {
-    border: "1px solid #21262d",
+    border: "1px solid #2e3440",
     borderRadius: 8,
     padding: 20,
-    background: "#161b22",
+    background: "#232936",
   },
   rfStats: {
     display: "flex",
@@ -2246,7 +2272,7 @@ const styles = {
   rfBarTrack: {
     flex: 1,
     height: 20,
-    background: "#0d1117",
+    background: "#1a1f2e",
     borderRadius: 4,
     overflow: "hidden",
   },
