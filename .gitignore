@@ -7,3 +7,4 @@ server/__pycache__/
 *.pyc
 .DS_Store
 .claude/
+.env.local

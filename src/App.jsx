@@ -1,12 +1,23 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, GeoJsonLayer } from "@deck.gl/layers";
 import { WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
-import Map from "react-map-gl/maplibre";
-import "maplibre-gl/dist/maplibre-gl.css";
+import Map from "react-map-gl/mapbox";
+import "mapbox-gl/dist/mapbox-gl.css";
 
-const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
+const MAP_STYLES = [
+  { id: "dark",           name: "Dark",           url: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" },
+  { id: "light",          name: "Light",          url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" },
+  { id: "voyager",        name: "Voyager",        url: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json" },
+  { id: "satellite",      name: "Satellite",      url: "mapbox://styles/matspmapping/cmg9qmif500a801sa4f0b5p5o" },
+  { id: "street-numbers", name: "Street Numbers", url: "mapbox://styles/matspmapping/cmj2jmgfx004701se4c711vwc" },
+];
+const resolveStyle = (url) =>
+  url.startsWith("mapbox://styles/")
+    ? `https://api.mapbox.com/styles/v1/${url.slice(16)}?access_token=${MAPBOX_TOKEN}`
+    : url;
 const hexToRgb = (hex) => [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
 
 const API = "http://localhost:8000";
@@ -795,6 +806,145 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
   );
 }
 
+// ─── Stacked bar chart helper (used by Stats tab) ─────────────────
+function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClusterIds, rotateLabels = false) {
+  if (!canvas || !labels.length) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
+  const margin = { top: 22, right: 16, bottom: rotateLabels ? 72 : 32, left: 36 };
+  const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
+  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, w, h);
+
+  const viewCids = [...viewClusterIds].sort();
+  const totals = labels.map((l) => viewCids.reduce((s, cid) => s + ((counts[l] || {})[cid] || 0), 0));
+  const maxVal = Math.max(...totals, 1);
+  const gap = 3;
+  const barW = Math.max(4, pw / labels.length - gap);
+
+  // Grid lines
+  ctx.strokeStyle = "#1a2030"; ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75, 1].forEach((pct) => {
+    const y = margin.top + ph * (1 - pct);
+    ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + pw, y); ctx.stroke();
+    ctx.fillStyle = "#555"; ctx.font = "9px monospace"; ctx.textAlign = "right";
+    ctx.fillText(Math.round(pct * maxVal), margin.left - 3, y + 3);
+  });
+
+  // Bars
+  labels.forEach((label, i) => {
+    const x = margin.left + i * (barW + gap);
+    let y = margin.top + ph;
+    viewCids.forEach((cid) => {
+      const count = (counts[label] || {})[cid] || 0;
+      if (!count) return;
+      const barH = Math.max(1, (count / maxVal) * ph);
+      const ci = clusters.indexOf(Number(cid));
+      ctx.fillStyle = getClusterColor(ci >= 0 ? ci : 0);
+      ctx.fillRect(x, y - barH, barW, barH);
+      y -= barH;
+    });
+    // X label
+    ctx.fillStyle = "#667"; ctx.font = "9px monospace";
+    if (rotateLabels) {
+      ctx.save(); ctx.translate(x + barW / 2, margin.top + ph + 6); ctx.rotate(Math.PI / 4);
+      ctx.textAlign = "left"; ctx.fillText(String(label), 0, 0); ctx.restore();
+    } else {
+      ctx.textAlign = "center"; ctx.fillText(String(label), x + barW / 2, margin.top + ph + 14);
+    }
+  });
+
+  // Title
+  ctx.fillStyle = "#8b949e"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+  ctx.fillText(title, margin.left, 14);
+}
+
+// ─── Year KDE chart helper ────────────────────────────────────────
+function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
+  if (!canvas || !yearByCluster) return;
+  const allYears = Object.values(yearByCluster).flat();
+  if (!allYears.length) return;
+
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
+
+  const margin = { top: 22, right: 16, bottom: 36, left: 36 };
+  const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
+  ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, w, h);
+
+  const yMin = Math.floor(Math.min(...allYears) / 10) * 10 - 5;
+  const yMax = Math.ceil(Math.max(...allYears) / 10) * 10 + 5;
+  const xGrid = d3.range(yMin, yMax + 1, 1);
+  const xScale = d3.scaleLinear().domain([yMin, yMax]).range([margin.left, margin.left + pw]);
+
+  // KDE per cluster (Gaussian kernel, Silverman bandwidth)
+  const gaussian = (u) => Math.exp(-0.5 * u * u) / Math.sqrt(2 * Math.PI);
+  const densities = {};
+  [...viewClusterIds].forEach((cid) => {
+    const data = yearByCluster[cid];
+    if (!data?.length) return;
+    const std = d3.deviation(data) || 10;
+    const bw = Math.max(3, 1.06 * std * Math.pow(data.length, -0.2));
+    densities[cid] = xGrid.map((x) => d3.mean(data, (v) => gaussian((x - v) / bw) / bw));
+  });
+
+  const maxDensity = Math.max(...Object.values(densities).flat(), 1e-9);
+  const yScale = d3.scaleLinear().domain([0, maxDensity * 1.1]).range([margin.top + ph, margin.top]);
+
+  // Grid
+  ctx.strokeStyle = "#1a2030"; ctx.lineWidth = 1;
+  yScale.ticks(4).forEach((t) => {
+    ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke();
+  });
+
+  // X decade labels
+  ctx.fillStyle = "#667"; ctx.font = "9px monospace"; ctx.textAlign = "center";
+  for (let yr = Math.ceil(yMin / 10) * 10; yr <= yMax; yr += 10)
+    ctx.fillText(yr, xScale(yr), margin.top + ph + 14);
+
+  // KDE fills + lines
+  [...viewClusterIds].sort().forEach((cid) => {
+    const pts = densities[cid];
+    if (!pts) return;
+    const ci = clusters.indexOf(Number(cid));
+    const color = getClusterColor(ci >= 0 ? ci : 0);
+    const [r, g, b] = hexToRgb(color);
+
+    ctx.beginPath();
+    ctx.moveTo(xScale(xGrid[0]), yScale(0));
+    pts.forEach((y, i) => ctx.lineTo(xScale(xGrid[i]), yScale(y)));
+    ctx.lineTo(xScale(xGrid[xGrid.length - 1]), yScale(0));
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${r},${g},${b},0.12)`;
+    ctx.fill();
+
+    ctx.beginPath();
+    pts.forEach((y, i) => { if (i === 0) ctx.moveTo(xScale(xGrid[i]), yScale(y)); else ctx.lineTo(xScale(xGrid[i]), yScale(y)); });
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+  });
+
+  // Rug marks
+  [...viewClusterIds].forEach((cid) => {
+    const data = yearByCluster[cid];
+    if (!data?.length) return;
+    const ci = clusters.indexOf(Number(cid));
+    const color = getClusterColor(ci >= 0 ? ci : 0);
+    const [r, g, b] = hexToRgb(color);
+    ctx.strokeStyle = `rgba(${r},${g},${b},0.5)`; ctx.lineWidth = 1;
+    data.forEach((yr) => {
+      const x = xScale(yr);
+      ctx.beginPath(); ctx.moveTo(x, margin.top + ph); ctx.lineTo(x, margin.top + ph + 5); ctx.stroke();
+    });
+  });
+
+  // Title
+  ctx.fillStyle = "#8b949e"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+  ctx.fillText("Construction year (Nybyggnadsår)", margin.left, 14);
+}
+
 // ─── Map View ────────────────────────────────────────────────────
 function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol }) {
   const deckContainerRef = useRef();
@@ -818,6 +968,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     } catch { return { longitude: 0, latitude: 0, zoom: 4, pitch: 0, bearing: 0 }; }
   });
 
+  const [mapStyleId, setMapStyleId] = useState("dark");
   const [boxZoomActive, setBoxZoomActive] = useState(false);
   const [boxRect, setBoxRect] = useState(null);
 
@@ -825,8 +976,19 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
   const [mapSensorData, setMapSensorData] = useState(null);
   const [mapProfilesLoading, setMapProfilesLoading] = useState(false);
+  const [sensorProperties, setSensorProperties] = useState(null);
+  const [analysisTab, setAnalysisTab] = useState("profiles");
+  const [selectedBuildings, setSelectedBuildings] = useState(new Set());
+  const [buildingTimeseries, setBuildingTimeseries] = useState(null);
+  const [buildingGeometry, setBuildingGeometry] = useState(null);
+  const [buildingSearch, setBuildingSearch] = useState("");
   const canvasRef = useRef();
   const sensorCanvasRef = useRef();
+  const floorCanvasRef = useRef();
+  const yearCanvasRef = useRef();
+  const periodCanvasRef = useRef();
+  const typeCanvasRef = useRef();
+  const buildingCanvasRef = useRef();
 
   // Fetch full cluster profiles (for stable, representative means)
   useEffect(() => {
@@ -896,24 +1058,52 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     } catch { return sensorLocations; }
   }, [sensorLocations, viewState]);
 
-  // ── deck.gl layer ──
-  const layers = useMemo(() => [
-    new ScatterplotLayer({
-      id: "sensors",
-      data: sensorLocations,
-      getPosition: (d) => [d.lon, d.lat],
-      getFillColor: (d) => {
-        const ci = clusters.indexOf(d.cluster);
-        return [...hexToRgb(getClusterColor(ci >= 0 ? ci : 0)), 210];
-      },
-      getRadius: 1,
-      radiusUnits: "pixels",
-      radiusMinPixels: 2,
-      radiusMaxPixels: 8,
-      pickable: true,
-      updateTriggers: { getFillColor: [clusters] },
-    }),
-  ], [sensorLocations, clusters]);
+  const buildingHighlightIds = useMemo(() => {
+    if (selectedBuildings.size === 0 || !Array.isArray(sensorProperties)) return null;
+    return new Set(
+      sensorProperties
+        .filter((s) => selectedBuildings.has(s["lm_building_id"] || "Unknown"))
+        .map((s) => s.sensor_id)
+    );
+  }, [selectedBuildings, sensorProperties]);
+
+  // ── deck.gl layers ──
+  const layers = useMemo(() => {
+    const ls = [
+      new ScatterplotLayer({
+        id: "sensors",
+        data: sensorLocations,
+        getPosition: (d) => [d.lon, d.lat],
+        getFillColor: (d) => {
+          const ci = clusters.indexOf(d.cluster);
+          const color = hexToRgb(getClusterColor(ci >= 0 ? ci : 0));
+          const alpha = buildingHighlightIds
+            ? (buildingHighlightIds.has(d.id) ? 255 : 30)
+            : 210;
+          return [...color, alpha];
+        },
+        getRadius: (d) => buildingHighlightIds?.has(d.id) ? 2 : 1,
+        radiusUnits: "pixels",
+        radiusMinPixels: buildingHighlightIds ? 1 : 2,
+        radiusMaxPixels: 10,
+        pickable: true,
+        updateTriggers: { getFillColor: [clusters, buildingHighlightIds], getRadius: [buildingHighlightIds] },
+      }),
+    ];
+    if (buildingGeometry?.features?.length) {
+      ls.push(new GeoJsonLayer({
+        id: "buildings",
+        data: buildingGeometry,
+        filled: true,
+        stroked: true,
+        getFillColor: [88, 166, 255, 25],
+        getLineColor: [88, 166, 255, 220],
+        lineWidthMinPixels: 2,
+        lineWidthMaxPixels: 3,
+      }));
+    }
+    return ls;
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry]);
 
   const handleViewStateChange = useCallback(({ viewState: vs }) => setViewState({ ...vs }), []);
 
@@ -948,9 +1138,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const analyseView = () => {
     setAnalysedSensors(visibleSensors);
     setMapSensorData(null);
+    setSensorProperties(null);
+    setSelectedBuildings(new Set());
+    setBuildingTimeseries(null);
+    setBuildingGeometry(null);
     if (!visibleSensors.length || !selectedK) return;
     setMapProfilesLoading(true);
+
+    const allIds = visibleSensors.map((d) => d.id);
     const sampleIds = visibleSensors.filter((d) => selectedClusters.has(d.cluster)).slice(0, 200).map((d) => d.id);
+
     if (sampleIds.length > 0)
       fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(sampleIds.join(","))}`)
         .then((r) => r.json())
@@ -958,6 +1155,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         .catch(() => setMapProfilesLoading(false));
     else
       setMapProfilesLoading(false);
+
+    // Fetch full properties for stats/buildings (capped at 500)
+    fetch(`${API}/api/sensors-properties`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sensor_ids: allIds.slice(0, 500) }),
+    })
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data)) setSensorProperties(data); else console.error("sensors-properties:", data); })
+      .catch((e) => console.error("sensors-properties fetch failed:", e));
   };
 
   const displaySensors = analysedSensors ?? [];
@@ -996,6 +1203,77 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (!analysedSensors) return new Set();
     return new Set(analysedSensors.map((d) => String(d.cluster)));
   }, [analysedSensors]);
+
+  // ── Stats derived from sensor properties ──
+  const areaGroups = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return {};
+    const groups = {};
+    sensorProperties.forEach((s) => {
+      const key = s["lm_building_id"] || "Unknown";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(s);
+    });
+    return groups;
+  }, [sensorProperties]);
+
+  const floorData = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return null;
+    const counts = {};
+    sensorProperties.forEach((s) => {
+      const f = s["floor_df1"];
+      if (f == null || isNaN(f)) return;
+      const lbl = String(Math.round(f));
+      const cid = String(s[selectedK]);
+      if (!counts[lbl]) counts[lbl] = {};
+      counts[lbl][cid] = (counts[lbl][cid] || 0) + 1;
+    });
+    const labels = Object.keys(counts).map(Number).sort((a, b) => a - b).map(String);
+    return { labels, counts };
+  }, [sensorProperties, selectedK]);
+
+  const yearData = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return null;
+    const byCluster = {};
+    sensorProperties.forEach((s) => {
+      const y = s["Nybyggnadsår"];
+      const cid = String(s[selectedK]);
+      if (y != null && !isNaN(y) && y > 1800 && y < 2100) {
+        if (!byCluster[cid]) byCluster[cid] = [];
+        byCluster[cid].push(y);
+      }
+    });
+    return Object.keys(byCluster).length ? byCluster : null;
+  }, [sensorProperties, selectedK]);
+
+  const periodData = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return null;
+    const counts = {};
+    sensorProperties.forEach((s) => {
+      const p = s["construction_period"];
+      if (!p) return;
+      const cid = String(s[selectedK]);
+      if (!counts[p]) counts[p] = {};
+      counts[p][cid] = (counts[p][cid] || 0) + 1;
+    });
+    const labels = Object.keys(counts).sort();
+    return { labels, counts };
+  }, [sensorProperties, selectedK]);
+
+  const buildingTypeData = useMemo(() => {
+    if (!Array.isArray(sensorProperties)) return null;
+    const counts = {};
+    sensorProperties.forEach((s) => {
+      const t = s["andamal_typ"];
+      if (!t) return;
+      const cid = String(s[selectedK]);
+      if (!counts[t]) counts[t] = {};
+      counts[t][cid] = (counts[t][cid] || 0) + 1;
+    });
+    const labels = Object.keys(counts).sort((a, b) =>
+      Object.values(counts[b]).reduce((s, n) => s + n, 0) - Object.values(counts[a]).reduce((s, n) => s + n, 0)
+    );
+    return { labels, counts };
+  }, [sensorProperties, selectedK]);
 
   useEffect(() => {
     if (!allClusterProfiles || !analysedSensors || !canvasRef.current) return;
@@ -1043,6 +1321,95 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
   }, [allClusterProfiles, mapSensorData, viewClusterIds, clusters, analysedSensors, drawChart]);
 
+  // ── Building timeseries fetch ──
+  useEffect(() => {
+    if (selectedBuildings.size === 0 || !sensorProperties) { setBuildingTimeseries(null); return; }
+    const ids = sensorProperties
+      .filter((s) => selectedBuildings.has(s["lm_building_id"] || "Unknown"))
+      .slice(0, 200)
+      .map((s) => s.sensor_id);
+    if (!ids.length) return;
+    fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(ids.join(","))}`)
+      .then((r) => r.json())
+      .then(setBuildingTimeseries)
+      .catch(() => {});
+  }, [selectedBuildings, sensorProperties]);
+
+  // ── Building geometry fetch ──
+  useEffect(() => {
+    if (selectedBuildings.size === 0) { setBuildingGeometry(null); return; }
+    fetch(`${API}/api/building-geometries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lm_building_ids: [...selectedBuildings] }),
+    })
+      .then((r) => r.json())
+      .then((data) => { if (data?.features) setBuildingGeometry(data); })
+      .catch(() => {});
+  }, [selectedBuildings]);
+
+  // ── Fly to building when geometry loads ──
+  useEffect(() => {
+    if (!buildingGeometry?.features?.length || !deckContainerRef.current) return;
+    const allCoords = buildingGeometry.features.flatMap((f) => {
+      const c = f.geometry?.coordinates;
+      if (!c) return [];
+      if (f.geometry.type === "MultiPolygon") return c.flat(2);
+      if (f.geometry.type === "Polygon") return c.flat(1);
+      return c;
+    });
+    if (!allCoords.length) return;
+    const lons = allCoords.map((c) => c[0]), lats = allCoords.map((c) => c[1]);
+    try {
+      const { clientWidth: w, clientHeight: h } = deckContainerRef.current;
+      const vp = new WebMercatorViewport({ ...viewState, width: w, height: h });
+      const { longitude, latitude, zoom } = vp.fitBounds(
+        [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        { padding: 80 }
+      );
+      setViewState((vs) => ({ ...vs, longitude, latitude, zoom: Math.min(zoom, 19), transitionDuration: 700, transitionInterpolator: new FlyToInterpolator() }));
+    } catch {}
+  }, [buildingGeometry]);
+
+  // ── Stats charts (floor / year / period / building type) ──
+  useEffect(() => { if (floorData && floorCanvasRef.current && analysisTab === "stats") renderStackedBars(floorCanvasRef.current, floorData, "Floor level (floor_df1)", clusters, viewClusterIds); }, [floorData, clusters, viewClusterIds, analysisTab]);
+  useEffect(() => { if (yearData && yearCanvasRef.current && analysisTab === "stats") renderYearDensity(yearCanvasRef.current, yearData, clusters, viewClusterIds); }, [yearData, clusters, viewClusterIds, analysisTab]);
+  useEffect(() => { if (periodData && periodCanvasRef.current && analysisTab === "stats") renderStackedBars(periodCanvasRef.current, periodData, "Construction period", clusters, viewClusterIds, true); }, [periodData, clusters, viewClusterIds, analysisTab]);
+  useEffect(() => { if (buildingTypeData && typeCanvasRef.current && analysisTab === "stats") renderStackedBars(typeCanvasRef.current, buildingTypeData, "Building type (andamal_typ)", clusters, viewClusterIds, true); }, [buildingTypeData, clusters, viewClusterIds, analysisTab]);
+
+  // ── Building timeseries chart (Buildings tab) ──
+  useEffect(() => {
+    if (!buildingTimeseries || !allClusterProfiles || !buildingCanvasRef.current || analysisTab !== "buildings") return;
+    const ts = allClusterProfiles.timestamps;
+    if (!ts.length) return;
+    const viewProfiles = Object.fromEntries(
+      Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
+    );
+    const yVals = [
+      ...Object.values(viewProfiles).flatMap((p) => p.values),
+      ...Object.values(buildingTimeseries.sensors).flat(),
+    ].filter((v) => v != null && !isNaN(v));
+    if (!yVals.length) return;
+    drawChart(buildingCanvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
+      Object.entries(buildingTimeseries.sensors).forEach(([sid, vals]) => {
+        const s = sensorProperties?.find((p) => p.sensor_id === sid);
+        const ci = s ? clusters.indexOf(s[selectedK]) : -1;
+        ctx.strokeStyle = (ci >= 0 ? getClusterColor(ci) : "#888") + "50";
+        ctx.lineWidth = 1; ctx.beginPath();
+        let started = false;
+        vals.forEach((v, i) => { if (v == null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+        ctx.stroke();
+      });
+      Object.entries(viewProfiles).forEach(([cidStr, p]) => {
+        const ci = clusters.indexOf(Number(cidStr));
+        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0); ctx.lineWidth = 2.5; ctx.beginPath();
+        let started = false;
+        p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+        ctx.stroke();
+      });
+    });
+  }, [buildingTimeseries, allClusterProfiles, viewClusterIds, clusters, sensorProperties, selectedK, analysisTab, drawChart]);
+
   if (!metadataData) return <div style={styles.emptyState}><p style={styles.emptyIcon}>◉</p><p>No metadata available</p></div>;
 
   return (
@@ -1061,6 +1428,13 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           <button onClick={analyseView} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#457B9D", color: "#457B9D" }}>
             Analyse view
           </button>
+          <select
+            value={mapStyleId}
+            onChange={(e) => setMapStyleId(e.target.value)}
+            style={{ ...styles.select, padding: "3px 8px", fontSize: 11 }}
+          >
+            {MAP_STYLES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
         </div>
 
         {/* Filter panel */}
@@ -1097,12 +1471,13 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             controller={!boxZoomActive}
             layers={layers}
             onViewStateChange={handleViewStateChange}
+            glOptions={{ webgl2: true }}
             getTooltip={({ object }) => object && {
               html: `<strong style="color:#e0e0e0">${object.id}</strong><br/><span style="color:#8b949e">Cluster: ${object.cluster}</span>`,
               style: { background: "#1c2128", border: "1px solid #30363d", borderRadius: "6px", padding: "8px 12px", fontSize: "12px", fontFamily: "monospace" },
             }}
           >
-            <Map ref={mapRef} mapStyle={MAP_STYLE} />
+            <Map key={mapStyleId} ref={mapRef} mapStyle={resolveStyle(MAP_STYLES.find(s => s.id === mapStyleId).url)} mapboxAccessToken={MAPBOX_TOKEN} />
           </DeckGL>
 
           {/* Box zoom overlay */}
@@ -1119,20 +1494,28 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       </div>
 
       {/* Side panel */}
-      <div style={{ flex: "0 0 calc(50% - 16px)", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ flex: "0 0 calc(50% - 16px)", display: "flex", flexDirection: "column", gap: 10 }}>
         {!analysedSensors ? (
           <p style={styles.mapInfo}>Set your view and click "Analyse view" to inspect the area.</p>
         ) : (
           <>
-            <p style={styles.mapInfo}>{displaySensors.length.toLocaleString()} sensors analysed</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {/* Summary */}
+            <p style={{ ...styles.mapInfo, margin: 0 }}>
+              {displaySensors.length.toLocaleString()} sensors
+              {sensorProperties && ` · ${Object.keys(areaGroups).length} buildings`}
+              {` · ${viewClusterIds.size} clusters`}
+            </p>
+
+            {/* Cluster breakdown bars */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {clusters.map((c, i) => {
                 const count = byCluster[c] || 0;
+                if (!count) return null;
                 const pct = displaySensors.length > 0 ? count / displaySensors.length : 0;
                 return (
                   <div key={c} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ color: count > 0 ? getClusterColor(i) : "#444", fontSize: 11, fontWeight: 600, width: 70, flexShrink: 0 }}>Cluster {c}</span>
-                    <div style={{ flex: 1, background: "#161b22", borderRadius: 4, height: 12, overflow: "hidden" }}>
+                    <span style={{ color: getClusterColor(i), fontSize: 11, fontWeight: 600, width: 70, flexShrink: 0 }}>Cluster {c}</span>
+                    <div style={{ flex: 1, background: "#161b22", borderRadius: 4, height: 10, overflow: "hidden" }}>
                       <div style={{ width: `${pct * 100}%`, height: "100%", background: getClusterColor(i), borderRadius: 4 }} />
                     </div>
                     <span style={{ fontSize: 11, color: "#8b949e", width: 36, textAlign: "right", flexShrink: 0 }}>{count}</span>
@@ -1140,13 +1523,129 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 );
               })}
             </div>
-            {mapProfilesLoading && <p style={styles.mapInfo}>Loading sensors…</p>}
-            {allClusterProfiles && viewClusterIds.size > 0 && (
+
+            {/* Analysis tabs */}
+            <div style={{ display: "flex", gap: 4, borderBottom: "1px solid #21262d", paddingBottom: 0 }}>
+              {[["profiles", "Profiles"], ["stats", "Stats"], ["buildings", "Buildings"]].map(([id, label]) => (
+                <button key={id} onClick={() => setAnalysisTab(id)} style={{
+                  background: "none", border: "none", borderBottom: analysisTab === id ? "2px solid #58a6ff" : "2px solid transparent",
+                  color: analysisTab === id ? "#58a6ff" : "#8b949e", padding: "6px 14px", fontSize: 12,
+                  cursor: "pointer", fontFamily: "inherit", marginBottom: -1,
+                }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Profiles tab ── */}
+            {analysisTab === "profiles" && (
               <>
-                <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
-                <canvas ref={canvasRef} style={{ ...styles.canvas, height: 220 }} />
-                <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>{mapSensorData ? `Individual sensors (${Object.keys(mapSensorData.sensors).length})` : "Loading sensors…"} + cluster means</p>
-                <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 220 }} />
+                {mapProfilesLoading && <p style={styles.mapInfo}>Loading sensors…</p>}
+                {allClusterProfiles && viewClusterIds.size > 0 && (
+                  <>
+                    <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
+                    <canvas ref={canvasRef} style={{ ...styles.canvas, height: 200 }} />
+                    <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
+                      {mapSensorData ? `${Object.keys(mapSensorData.sensors).length} sensors` : "Loading…"} + cluster means
+                    </p>
+                    <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 200 }} />
+                  </>
+                )}
+              </>
+            )}
+
+            {/* ── Stats tab ── */}
+            {analysisTab === "stats" && (
+              <>
+                {!sensorProperties && <p style={styles.mapInfo}>Loading properties…</p>}
+                {sensorProperties && (
+                  <>
+                    {/* Cluster legend */}
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
+                      {[...viewClusterIds].sort().map((cid) => {
+                        const ci = clusters.indexOf(Number(cid));
+                        return (
+                          <span key={cid} style={{ fontSize: 10, color: getClusterColor(ci >= 0 ? ci : 0), display: "flex", alignItems: "center", gap: 3 }}>
+                            <span style={{ width: 8, height: 8, background: getClusterColor(ci >= 0 ? ci : 0), display: "inline-block", borderRadius: 1 }} />
+                            {cid}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {floorData?.labels.length > 0 && <canvas ref={floorCanvasRef} style={{ ...styles.canvas, height: 160 }} />}
+                    {periodData?.labels.length > 0 && <canvas ref={periodCanvasRef} style={{ ...styles.canvas, height: 160 }} />}
+                    {yearData && <canvas ref={yearCanvasRef} style={{ ...styles.canvas, height: 160 }} />}
+                    {buildingTypeData?.labels.length > 0 && <canvas ref={typeCanvasRef} style={{ ...styles.canvas, height: 160 }} />}
+                    {!floorData?.labels.length && !periodData?.labels.length && !yearData?.labels.length && !buildingTypeData?.labels.length && (
+                      <p style={styles.mapInfo}>No matching property data for sensors in this view.</p>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {/* ── Buildings tab ── */}
+            {analysisTab === "buildings" && (
+              <>
+                {!sensorProperties && <p style={styles.mapInfo}>Loading properties…</p>}
+                {sensorProperties && (
+                  <>
+                    <input
+                      type="text"
+                      placeholder="Search buildings…"
+                      value={buildingSearch}
+                      onChange={(e) => setBuildingSearch(e.target.value)}
+                      style={{ ...styles.searchInput, marginBottom: 0 }}
+                    />
+                    <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+                      {Object.entries(areaGroups)
+                        .filter(([name]) => !buildingSearch || name.toLowerCase().includes(buildingSearch.toLowerCase()))
+                        .sort(([, a], [, b]) => b.length - a.length)
+                        .map(([name, sensors]) => {
+                          const selected = selectedBuildings.has(name);
+                          // cluster breakdown for this building
+                          const clusterCounts = {};
+                          sensors.forEach((s) => { const cid = String(s[selectedK]); clusterCounts[cid] = (clusterCounts[cid] || 0) + 1; });
+                          return (
+                            <div
+                              key={name}
+                              onClick={() => setSelectedBuildings((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(name)) next.delete(name); else next.add(name);
+                                setBuildingTimeseries(null);
+                                return next;
+                              })}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 8, padding: "5px 8px",
+                                borderRadius: 5, cursor: "pointer", fontSize: 11,
+                                background: selected ? "#1f6feb22" : "transparent",
+                                border: `1px solid ${selected ? "#58a6ff" : "#21262d"}`,
+                              }}
+                            >
+                              <span style={{ flex: 1, color: selected ? "#58a6ff" : "#c9d1d9", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                              <span style={{ color: "#8b949e", flexShrink: 0 }}>{sensors.length}</span>
+                              <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+                                {Object.entries(clusterCounts).map(([cid, cnt]) => {
+                                  const ci = clusters.indexOf(Number(cid));
+                                  return <span key={cid} title={`Cluster ${cid}: ${cnt}`} style={{ width: 8, height: 8, borderRadius: "50%", background: getClusterColor(ci >= 0 ? ci : 0) }} />;
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+
+                    {selectedBuildings.size > 0 && (
+                      <>
+                        <p style={{ ...styles.mapInfo, marginBottom: 0 }}>
+                          {selectedBuildings.size} building{selectedBuildings.size > 1 ? "s" : ""} selected
+                          {buildingTimeseries ? ` · ${Object.keys(buildingTimeseries.sensors).length} sensors` : " · Loading…"}
+                        </p>
+                        <canvas ref={buildingCanvasRef} style={{ ...styles.canvas, height: 220 }} />
+                      </>
+                    )}
+                  </>
+                )}
               </>
             )}
           </>
@@ -1628,6 +2127,23 @@ const styles = {
     fontSize: 12,
     color: "#8b949e",
     marginBottom: 8,
+  },
+  th: {
+    padding: "4px 8px",
+    textAlign: "left",
+    fontSize: 10,
+    color: "#8b949e",
+    borderBottom: "1px solid #21262d",
+    textTransform: "uppercase",
+    letterSpacing: "0.4px",
+    whiteSpace: "nowrap",
+  },
+  td: {
+    padding: "3px 8px",
+    fontSize: 11,
+    color: "#c9d1d9",
+    borderBottom: "1px solid #161b22",
+    whiteSpace: "nowrap",
   },
   tooltip: {
     position: "absolute",

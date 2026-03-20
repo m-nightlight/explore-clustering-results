@@ -47,7 +47,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -349,6 +349,73 @@ async def get_map_cluster_profiles(
     return reshape_profiles(rows)
 
 
+@app.post("/api/building-geometries")
+async def get_building_geometries(request: Request):
+    """Return GeoJSON FeatureCollection for up to 50 buildings (POST body: {lm_building_ids: [...]})."""
+    body = await request.json()
+    ids = body.get("lm_building_ids", [])[:50]
+    if not ids:
+        return {"type": "FeatureCollection", "features": []}
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (properties->>'lm_building_id')
+                properties->>'lm_building_id' AS lm_building_id,
+                ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom
+            FROM sensors
+            WHERE properties->>'lm_building_id' = ANY($1::text[])
+              AND building_geom IS NOT NULL
+            ORDER BY properties->>'lm_building_id'
+            """,
+            ids,
+        )
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": json.loads(r["geom"]),
+                "properties": {"lm_building_id": r["lm_building_id"]},
+            }
+            for r in rows if r["geom"]
+        ],
+    }
+
+
+@app.post("/api/sensors-properties")
+async def get_sensors_properties_batch(request: Request):
+    """Batch fetch full properties for up to 500 sensors (POST body: {sensor_ids: [...]})."""
+    body = await request.json()
+    ids = body.get("sensor_ids", [])[:500]
+    if not ids:
+        return []
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT sensor_id, lat, lon, domain_code, area,
+                   stage1_cluster, stage2_subcluster, cluster, properties
+            FROM sensors
+            WHERE sensor_id = ANY($1::text[])
+            ORDER BY sensor_id
+            """,
+            ids,
+        )
+    return [
+        {
+            "sensor_id": r["sensor_id"],
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "domain_code": r["domain_code"],
+            "area": r["area"],
+            "stage1_cluster": r["stage1_cluster"],
+            "stage2_subcluster": r["stage2_subcluster"],
+            "cluster": r["cluster"],
+            **(r["properties"] or {}),
+        }
+        for r in rows
+    ]
+
+
 _SAFE_FIELD = re.compile(r"^[a-zA-Z0-9_]+$")
 
 
@@ -365,7 +432,8 @@ async def get_filter_options(request: Request):
                 options.setdefault(col, set()).add(r[col])
         for k, v in (r["properties"] or {}).items():
             if v is not None and not isinstance(v, (dict, list)):
-                options.setdefault(k, set()).add(str(v))
+                str_val = str(v).lower() if isinstance(v, bool) else str(v)
+                options.setdefault(k, set()).add(str_val)
 
     # Only fields with 2–100 unique values are useful as filters
     return {k: sorted(v) for k, v in options.items() if 1 < len(v) <= 100}
