@@ -4,12 +4,17 @@ import re
 from contextlib import asynccontextmanager
 
 import asyncpg
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/sensor_explorer")
+POINT_HEIGHTS_PARQUET = os.environ.get(
+    "POINT_HEIGHTS_PARQUET",
+    "/Users/matsp/phd-python-projects/coordinate_editor/points_export.parquet",
+)
 
 def _parse_dsn_for_asyncpg(url: str):
     """Strip params asyncpg doesn't understand (e.g. gssencmode) from the DSN."""
@@ -37,6 +42,15 @@ async def init_conn(conn):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(_parse_dsn_for_asyncpg(DATABASE_URL), init=init_conn)
+    try:
+        df = pd.read_parquet(POINT_HEIGHTS_PARQUET, columns=["id", "floor", "lm_height", "lm_max_floor"])
+        df = df.dropna(subset=["id"])
+        df["floor"] = df["floor"].clip(lower=0, upper=df["lm_max_floor"])
+        df = df.drop_duplicates(subset=["id"])
+        app.state.point_heights = df.set_index("id")[["floor", "lm_height", "lm_max_floor"]].to_dict("index")
+    except Exception as e:
+        print(f"Warning: could not load point heights from parquet: {e}")
+        app.state.point_heights = {}
     yield
     await app.state.pool.close()
 
@@ -441,9 +455,23 @@ async def get_filter_options(request: Request):
 
 @app.get("/api/filtered-sensor-ids")
 async def get_filtered_sensor_ids(request: Request):
-    """Return sensor_ids matching all supplied field=value1,value2 filters."""
+    """Return sensor_ids matching all supplied field=value1,value2 filters.
+
+    Special parameters (not treated as value filters):
+      min_building_floors=N  — only sensors in buildings where max(floor_df1) >= N
+    """
     raw = {k: v for k, v in request.query_params.items() if v}
-    if not raw:
+
+    # Extract special numeric filters before processing value filters
+    min_building_floors_str = raw.pop("min_building_floors", None)
+    min_building_floors: int | None = None
+    if min_building_floors_str:
+        try:
+            min_building_floors = int(min_building_floors_str)
+        except ValueError:
+            raise HTTPException(400, "min_building_floors must be an integer")
+
+    if not raw and min_building_floors is None:
         return {"sensor_ids": None}
 
     conditions: list[str] = []
@@ -462,6 +490,19 @@ async def get_filtered_sensor_ids(request: Request):
         else:
             conditions.append(f"properties->>'{field}' = ANY(${idx}::text[])")
 
+    if min_building_floors is not None:
+        params.append(min_building_floors)
+        idx = len(params)
+        conditions.append(f"""
+            properties->>'lm_building_id' IN (
+                SELECT properties->>'lm_building_id'
+                FROM sensors
+                WHERE properties->>'lm_building_id' IS NOT NULL
+                GROUP BY properties->>'lm_building_id'
+                HAVING MAX((properties->>'floor_df1')::numeric) >= ${idx}
+            )
+        """)
+
     if not conditions:
         return {"sensor_ids": None}
 
@@ -470,3 +511,9 @@ async def get_filtered_sensor_ids(request: Request):
         rows = await conn.fetch(query, *params)
 
     return {"sensor_ids": [r["sensor_id"] for r in rows]}
+
+
+@app.get("/api/point-heights")
+async def get_point_heights(request: Request):
+    """Return per-sensor floor + building height data from the parquet export."""
+    return request.app.state.point_heights
