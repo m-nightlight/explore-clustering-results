@@ -1630,8 +1630,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         if (!byCid[cid]) byCid[cid] = { ci, lines: [] };
         byCid[cid].lines.push(vals);
       });
-      Object.entries(byCid).forEach(([, { ci, lines }]) => {
-        const color = getEffectiveClusterColor(Number(cid === "__unknown" ? -1 : cid), ci);
+      Object.entries(byCid).forEach(([cid, { ci, lines }]) => {
+        const color = getEffectiveClusterColor(cid === "__unknown" ? -1 : Number(cid), ci);
         const [r, g, b] = hexToRgb(color);
         ctx.strokeStyle = `rgba(${r},${g},${b},0.65)`;
         ctx.lineWidth = 1.5;
