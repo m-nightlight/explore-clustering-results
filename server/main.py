@@ -44,10 +44,11 @@ async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(_parse_dsn_for_asyncpg(DATABASE_URL), init=init_conn)
     try:
         df = pd.read_parquet(POINT_HEIGHTS_PARQUET, columns=["id", "floor", "lm_height", "lm_max_floor"])
-        df = df.dropna(subset=["id"])
+        df = df.dropna(subset=["id", "lm_height", "lm_max_floor"])
         df["floor"] = df["floor"].clip(lower=0, upper=df["lm_max_floor"])
         df = df.drop_duplicates(subset=["id"])
-        app.state.point_heights = df.set_index("id")[["floor", "lm_height", "lm_max_floor"]].to_dict("index")
+        records = df[["floor", "lm_height", "lm_max_floor"]].astype(float).to_dict("records")
+        app.state.point_heights = dict(zip(df["id"], records))
     except Exception as e:
         print(f"Warning: could not load point heights from parquet: {e}")
         app.state.point_heights = {}

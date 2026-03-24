@@ -35,6 +35,9 @@ const COLORS = [
 
 const getClusterColor = (i) => COLORS[i % COLORS.length];
 
+// Visually distinct group colours, different enough from COLORS palette
+const GROUP_COLORS = ["#FFFFFF","#FFD93D","#FF6B9D","#6BCB77","#C8B6FF","#FF9A3C","#4CC9F0"];
+
 const SPHERE_GEOMETRY = new SphereGeometry({ radius: 1, nlat: 8, nlong: 8 });
 
 // ─── API Utilities ───────────────────────────────────────────────
@@ -64,6 +67,11 @@ export default function App() {
   const [selectedClusters, setSelectedClusters] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // ── Cluster groups ──
+  const [clusterGroups, setClusterGroups] = useState([]);
+  const [groupingMode, setGroupingMode] = useState(false);
+  const [pendingGroupMembers, setPendingGroupMembers] = useState(new Set());
 
   // Derive cluster columns from metadata
   useEffect(() => {
@@ -170,6 +178,38 @@ export default function App() {
   const selectAllClusters = () => setSelectedClusters(new Set(clusters));
   const selectNoneClusters = () => setSelectedClusters(new Set());
 
+  // Map clusterID → group index for fast lookup
+  const clusterToGroupIdx = useMemo(() => {
+    const map = {};
+    clusterGroups.forEach((g, gi) => g.memberIds.forEach((cid) => { map[String(cid)] = gi; }));
+    return map;
+  }, [clusterGroups]);
+
+  const getEffectiveClusterColor = useCallback((cluster, ci) => {
+    const gi = clusterToGroupIdx[String(cluster)];
+    return gi !== undefined ? GROUP_COLORS[gi % GROUP_COLORS.length] : getClusterColor(ci >= 0 ? ci : 0);
+  }, [clusterToGroupIdx]);
+
+  const togglePending = (c) => {
+    setPendingGroupMembers((prev) => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c); else next.add(c);
+      return next;
+    });
+  };
+
+  const createGroup = () => {
+    if (pendingGroupMembers.size < 2) return;
+    setClusterGroups((prev) => [
+      ...prev,
+      { id: `g${Date.now()}`, name: `Group ${prev.length + 1}`, memberIds: new Set(pendingGroupMembers) },
+    ]);
+    setPendingGroupMembers(new Set());
+    setGroupingMode(false);
+  };
+
+  const deleteGroup = (gid) => setClusterGroups((prev) => prev.filter((g) => g.id !== gid));
+
   const isDataLoaded = metadataData !== null;
 
   return (
@@ -238,19 +278,62 @@ export default function App() {
               <span style={styles.clusterBarTitle}>Clusters</span>
               <button onClick={selectAllClusters} style={styles.miniBtn}>All</button>
               <button onClick={selectNoneClusters} style={styles.miniBtn}>None</button>
+              <button
+                onClick={() => { setGroupingMode((v) => !v); setPendingGroupMembers(new Set()); }}
+                style={{ ...styles.miniBtn, borderColor: groupingMode ? "#FFD93D" : "#3d4555", color: groupingMode ? "#FFD93D" : "#8b949e", background: groupingMode ? "#FFD93D22" : "none" }}
+              >
+                ⊕ Group
+              </button>
+              {groupingMode && pendingGroupMembers.size >= 2 && (
+                <button onClick={createGroup} style={{ ...styles.miniBtn, borderColor: "#6BCB77", color: "#6BCB77", background: "#6BCB7722" }}>
+                  ✓ Create ({pendingGroupMembers.size})
+                </button>
+              )}
             </div>
             <div style={styles.clusterChips}>
+              {/* Existing groups */}
+              {clusterGroups.map((g, gi) => {
+                const groupColor = GROUP_COLORS[gi % GROUP_COLORS.length];
+                const memberList = [...g.memberIds].sort((a, b) => a - b);
+                const count = metadataData.filter((r) => memberList.includes(r[selectedK])).length;
+                const allOn = memberList.every((c) => selectedClusters.has(c));
+                return (
+                  <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                    <button
+                      onClick={() => setSelectedClusters((prev) => {
+                        const next = new Set(prev);
+                        if (allOn) memberList.forEach((c) => next.delete(c)); else memberList.forEach((c) => next.add(c));
+                        return next;
+                      })}
+                      style={{ ...styles.chip, backgroundColor: allOn ? groupColor : "transparent", color: allOn ? "#111" : "#999", borderColor: groupColor, fontWeight: 600 }}
+                    >
+                      {g.name}: {memberList.join("+")} <span style={styles.chipCount}>({count})</span>
+                    </button>
+                    <button onClick={() => deleteGroup(g.id)} style={{ ...styles.miniBtn, padding: "1px 5px", fontSize: 10, color: "#f85149", borderColor: "#f85149", lineHeight: 1 }}>×</button>
+                  </span>
+                );
+              })}
+              {/* Individual cluster chips */}
               {clusters.map((c, i) => {
+                const inGroup = clusterToGroupIdx[String(c)] !== undefined;
+                if (inGroup) return null; // grouped clusters hidden from individual list
                 const count = metadataData.filter((r) => r[selectedK] === c).length;
+                const isPending = pendingGroupMembers.has(c);
+                const isSelected = selectedClusters.has(c);
+                const color = getEffectiveClusterColor(c, i);
                 return (
                   <button
                     key={c}
-                    onClick={() => toggleCluster(c)}
+                    onClick={() => groupingMode ? togglePending(c) : toggleCluster(c)}
                     style={{
                       ...styles.chip,
-                      backgroundColor: selectedClusters.has(c) ? getClusterColor(i) : "transparent",
-                      color: selectedClusters.has(c) ? "#fff" : "#999",
-                      borderColor: getClusterColor(i),
+                      backgroundColor: groupingMode
+                        ? (isPending ? color + "55" : "transparent")
+                        : (isSelected ? color : "transparent"),
+                      color: (groupingMode ? isPending : isSelected) ? "#fff" : "#999",
+                      borderColor: color,
+                      borderStyle: groupingMode ? (isPending ? "solid" : "dashed") : "solid",
+                      opacity: groupingMode && !isPending ? 0.5 : 1,
                     }}
                   >
                     {c} <span style={styles.chipCount}>({count})</span>
@@ -267,6 +350,8 @@ export default function App() {
                 selectedK={selectedK}
                 clusters={clusters}
                 selectedClusters={selectedClusters}
+                clusterGroups={clusterGroups}
+                getEffectiveClusterColor={getEffectiveClusterColor}
               />
             )}
             {activeTab === "timeseries" && (
@@ -285,6 +370,8 @@ export default function App() {
                 clusters={clusters}
                 selectedClusters={selectedClusters}
                 sensorIdCol={sensorIdCol}
+                clusterGroups={clusterGroups}
+                getEffectiveClusterColor={getEffectiveClusterColor}
               />
             )}
             {activeTab === "rf" && (
@@ -305,7 +392,7 @@ export default function App() {
 
 
 // ─── Cluster Profiles ────────────────────────────────────────────
-function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
+function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups = [], getEffectiveClusterColor = getClusterColor }) {
   const [profileType, setProfileType] = useState("mean");
   const [profiles, setProfiles] = useState(null);
   const [profilesLoading, setProfilesLoading] = useState(false);
@@ -389,7 +476,7 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
     clusters.forEach((c, ci) => {
       const p = profiles.profiles[String(c)];
       if (!selectedClusters.has(c) || !p) return;
-      const color = getClusterColor(ci);
+      const color = getEffectiveClusterColor(c, ci);
 
       // IQR band
       ctx.fillStyle = color + "18";
@@ -423,13 +510,39 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
       ctx.stroke();
     });
 
+    // Draw combined group lines (weighted mean of member profiles)
+    clusterGroups.forEach((g, gi) => {
+      const memberIds = [...g.memberIds].map(String);
+      const memberProfiles = memberIds.map((id) => profiles.profiles[id]).filter(Boolean);
+      const visibleMembers = memberProfiles.filter((_, j) => selectedClusters.has([...g.memberIds][j]));
+      if (visibleMembers.length < 2) return;
+      const n = profiles.timestamps.length;
+      const combined = Array.from({ length: n }, (_, i) => {
+        const vals = visibleMembers.map((p) => p.values[i]).filter((v) => v !== null);
+        return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+      });
+      const color = GROUP_COLORS[gi % GROUP_COLORS.length];
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 4]);
+      ctx.beginPath();
+      let started = false;
+      combined.forEach((v, i) => {
+        if (v === null) return;
+        if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; }
+        else ctx.lineTo(xScale(i), yScale(v));
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
+
     // Legend
     let lx = margin.left + 10;
     let ly = margin.top + 10;
     clusters.forEach((c, ci) => {
       const p = profiles.profiles[String(c)];
       if (!selectedClusters.has(c) || !p) return;
-      ctx.fillStyle = getClusterColor(ci);
+      ctx.fillStyle = getEffectiveClusterColor(c, ci);
       ctx.fillRect(lx, ly, 12, 12);
       ctx.fillStyle = "#ccc";
       ctx.font = "11px monospace";
@@ -439,7 +552,19 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters }) {
       lx += ctx.measureText(label).width + 36;
       if (lx > w - 150) { lx = margin.left + 10; ly += 18; }
     });
-  }, [profiles, selectedClusters, clusters]);
+    // Group legend entries
+    clusterGroups.forEach((g, gi) => {
+      const color = GROUP_COLORS[gi % GROUP_COLORS.length];
+      ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.setLineDash([8, 3]);
+      ctx.beginPath(); ctx.moveTo(lx, ly + 6); ctx.lineTo(lx + 18, ly + 6); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ccc"; ctx.font = "11px monospace"; ctx.textAlign = "left";
+      const label = `${g.name} (${[...g.memberIds].sort((a,b)=>a-b).join("+")})`;
+      ctx.fillText(label, lx + 22, ly + 10);
+      lx += ctx.measureText(label).width + 46;
+      if (lx > w - 150) { lx = margin.left + 10; ly += 18; }
+    });
+  }, [profiles, selectedClusters, clusters, clusterGroups, getEffectiveClusterColor]);
 
   return (
     <div>
@@ -811,7 +936,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
 }
 
 // ─── Stacked bar chart helper (used by Stats tab) ─────────────────
-function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClusterIds, rotateLabels = false) {
+function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClusterIds, rotateLabels = false, colorFn = getClusterColor) {
   if (!canvas || !labels.length) return;
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
@@ -845,7 +970,7 @@ function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClus
       if (!count) return;
       const barH = Math.max(1, (count / maxVal) * ph);
       const ci = clusters.indexOf(Number(cid));
-      ctx.fillStyle = getClusterColor(ci >= 0 ? ci : 0);
+      ctx.fillStyle = colorFn(Number(cid), ci);
       ctx.fillRect(x, y - barH, barW, barH);
       y -= barH;
     });
@@ -865,7 +990,7 @@ function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClus
 }
 
 // ─── Year KDE chart helper ────────────────────────────────────────
-function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
+function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds, colorFn = getClusterColor) {
   if (!canvas || !yearByCluster) return;
   const allYears = Object.values(yearByCluster).flat();
   if (!allYears.length) return;
@@ -914,7 +1039,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
     const pts = densities[cid];
     if (!pts) return;
     const ci = clusters.indexOf(Number(cid));
-    const color = getClusterColor(ci >= 0 ? ci : 0);
+    const color = colorFn(Number(cid), ci);
     const [r, g, b] = hexToRgb(color);
 
     ctx.beginPath();
@@ -935,7 +1060,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
     const data = yearByCluster[cid];
     if (!data?.length) return;
     const ci = clusters.indexOf(Number(cid));
-    const color = getClusterColor(ci >= 0 ? ci : 0);
+    const color = colorFn(Number(cid), ci);
     const [r, g, b] = hexToRgb(color);
     ctx.strokeStyle = `rgba(${r},${g},${b},0.5)`; ctx.lineWidth = 1;
     data.forEach((yr) => {
@@ -950,7 +1075,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds) {
 }
 
 // ─── Map View ────────────────────────────────────────────────────
-function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol }) {
+function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol, clusterGroups = [], getEffectiveClusterColor = getClusterColor }) {
   const deckContainerRef = useRef();
   const mapRef = useRef();
   const boxOverlayRef = useRef();
@@ -1107,12 +1232,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         getTargetPosition: (d) => [d.lon, d.lat, d.elevation],
         getColor: (d) => {
           const ci = clusters.indexOf(d.cluster);
-          const [r, g, b] = hexToRgb(getClusterColor(ci >= 0 ? ci : 0));
+          const [r, g, b] = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
           return [r, g, b, buildingHighlightIds ? (buildingHighlightIds.has(d.id) ? 160 : 20) : 80];
         },
         getWidth: 1,
         widthUnits: "pixels",
-        updateTriggers: { getColor: [clusters, buildingHighlightIds] },
+        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups] },
       }));
     }
     if (mode3D) {
@@ -1127,7 +1252,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         },
         getColor: (d) => {
           const ci = clusters.indexOf(d.cluster);
-          const color = hexToRgb(getClusterColor(ci >= 0 ? ci : 0));
+          const color = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
           const alpha = buildingHighlightIds
             ? (buildingHighlightIds.has(d.id) ? 255 : 40)
             : 220;
@@ -1136,7 +1261,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         sizeScale: 1,
         pickable: true,
         parameters: { depthTest: true },
-        updateTriggers: { getColor: [clusters, buildingHighlightIds], getScale: [buildingHighlightIds] },
+        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups], getScale: [buildingHighlightIds] },
       }));
     } else {
       ls.push(new ScatterplotLayer({
@@ -1145,7 +1270,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         getPosition: (d) => [d.lon, d.lat, 0],
         getFillColor: (d) => {
           const ci = clusters.indexOf(d.cluster);
-          const color = hexToRgb(getClusterColor(ci >= 0 ? ci : 0));
+          const color = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
           const alpha = buildingHighlightIds
             ? (buildingHighlightIds.has(d.id) ? 255 : 30)
             : 210;
@@ -1156,7 +1281,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         radiusMinPixels: buildingHighlightIds ? 3 : 2,
         radiusMaxPixels: buildingHighlightIds ? 14 : 8,
         pickable: true,
-        updateTriggers: { getFillColor: [clusters, buildingHighlightIds], getRadius: [buildingHighlightIds] },
+        updateTriggers: { getFillColor: [clusters, buildingHighlightIds, clusterGroups], getRadius: [buildingHighlightIds] },
       }));
     }
     if (buildingGeometry?.features?.length) {
@@ -1387,13 +1512,13 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     drawChart(canvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
-        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0); ctx.lineWidth = 2; ctx.beginPath();
+        ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
         let started = false;
         p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
         ctx.stroke();
       });
     });
-  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab]);
+  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor]);
 
   useEffect(() => {
     if (analysisTab !== "profiles") return;
@@ -1409,20 +1534,21 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       Object.entries(activeSensorData.sensors).forEach(([sid, vals]) => {
         const sensor = analysedSensors?.find((d) => d.id === sid);
         const ci = sensor ? clusters.indexOf(sensor.cluster) : -1;
-        ctx.strokeStyle = (ci >= 0 ? getClusterColor(ci) : "#888") + "40"; ctx.lineWidth = 1; ctx.beginPath();
+        const baseColor = sensor ? getEffectiveClusterColor(sensor.cluster, ci) : "#888";
+        ctx.strokeStyle = baseColor + "40"; ctx.lineWidth = 1; ctx.beginPath();
         let started = false;
         vals.forEach((v, i) => { if (v == null || isNaN(v)) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
         ctx.stroke();
       });
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
-        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0); ctx.lineWidth = 2; ctx.beginPath();
+        ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
         let started = false;
         p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
         ctx.stroke();
       });
     });
-  }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab]);
+  }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -1475,10 +1601,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   }, [buildingGeometry]);
 
   // ── Stats charts (floor / year / period / building type) ──
-  useEffect(() => { if (floorData && floorCanvasRef.current && analysisTab === "stats") renderStackedBars(floorCanvasRef.current, floorData, "Floor level (floor_df1)", clusters, viewClusterIds); }, [floorData, clusters, viewClusterIds, analysisTab]);
-  useEffect(() => { if (yearData && yearCanvasRef.current && analysisTab === "stats") renderStackedBars(yearCanvasRef.current, yearData, "Construction year (Nybyggnadsår)", clusters, viewClusterIds, true); }, [yearData, clusters, viewClusterIds, analysisTab]);
-  useEffect(() => { if (periodData && periodCanvasRef.current && analysisTab === "stats") renderStackedBars(periodCanvasRef.current, periodData, "Construction period", clusters, viewClusterIds, true); }, [periodData, clusters, viewClusterIds, analysisTab]);
-  useEffect(() => { if (buildingTypeData && typeCanvasRef.current && analysisTab === "stats") renderStackedBars(typeCanvasRef.current, buildingTypeData, "Building type (andamal_typ)", clusters, viewClusterIds, true); }, [buildingTypeData, clusters, viewClusterIds, analysisTab]);
+  useEffect(() => { if (floorData && floorCanvasRef.current && analysisTab === "stats") renderStackedBars(floorCanvasRef.current, floorData, "Floor level (floor_df1)", clusters, viewClusterIds, false, getEffectiveClusterColor); }, [floorData, clusters, viewClusterIds, analysisTab, getEffectiveClusterColor]);
+  useEffect(() => { if (yearData && yearCanvasRef.current && analysisTab === "stats") renderYearDensity(yearCanvasRef.current, yearData, clusters, viewClusterIds, getEffectiveClusterColor); }, [yearData, clusters, viewClusterIds, analysisTab, getEffectiveClusterColor]);
+  useEffect(() => { if (periodData && periodCanvasRef.current && analysisTab === "stats") renderStackedBars(periodCanvasRef.current, periodData, "Construction period", clusters, viewClusterIds, true, getEffectiveClusterColor); }, [periodData, clusters, viewClusterIds, analysisTab, getEffectiveClusterColor]);
+  useEffect(() => { if (buildingTypeData && typeCanvasRef.current && analysisTab === "stats") renderStackedBars(typeCanvasRef.current, buildingTypeData, "Building type (andamal_typ)", clusters, viewClusterIds, true, getEffectiveClusterColor); }, [buildingTypeData, clusters, viewClusterIds, analysisTab, getEffectiveClusterColor]);
 
   // ── Building timeseries chart (Buildings tab) ──
   useEffect(() => {
@@ -1505,7 +1631,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         byCid[cid].lines.push(vals);
       });
       Object.entries(byCid).forEach(([, { ci, lines }]) => {
-        const color = getClusterColor(ci >= 0 ? ci : 0);
+        const color = getEffectiveClusterColor(Number(cid === "__unknown" ? -1 : cid), ci);
         const [r, g, b] = hexToRgb(color);
         ctx.strokeStyle = `rgba(${r},${g},${b},0.65)`;
         ctx.lineWidth = 1.5;
@@ -1519,7 +1645,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       // Cluster mean lines on top — thick + dashed
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
-        ctx.strokeStyle = getClusterColor(ci >= 0 ? ci : 0);
+        ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci);
         ctx.lineWidth = 2.5; ctx.setLineDash([8, 3]); ctx.beginPath();
         let started = false;
         p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
@@ -1530,14 +1656,14 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       let lx = margin.left, ly = margin.top;
       Object.entries(byCid).forEach(([cid, { ci }]) => {
         if (cid === "__unknown") return;
-        const color = getClusterColor(ci >= 0 ? ci : 0);
+        const color = getEffectiveClusterColor(Number(cid), ci);
         ctx.fillStyle = color; ctx.fillRect(lx, ly, 10, 10);
         ctx.fillStyle = "#ccc"; ctx.font = "10px monospace"; ctx.textAlign = "left";
         ctx.fillText(`Cluster ${cid}`, lx + 14, ly + 9);
         lx += ctx.measureText(`Cluster ${cid}`).width + 28;
       });
     });
-  }, [buildingTimeseries, allClusterProfiles, viewClusterIds, activeByCluster, clusters, sensorProperties, selectedK, analysisTab, drawChart]);
+  }, [buildingTimeseries, allClusterProfiles, viewClusterIds, activeByCluster, clusters, sensorProperties, selectedK, analysisTab, drawChart, getEffectiveClusterColor]);
 
   if (!metadataData) return <div style={styles.emptyState}><p style={styles.emptyIcon}>◉</p><p>No metadata available</p></div>;
 
@@ -1678,9 +1804,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 const pct = activeTotal > 0 ? count / activeTotal : 0;
                 return (
                   <div key={c} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ color: getClusterColor(i), fontSize: 11, fontWeight: 600, width: 70, flexShrink: 0 }}>Cluster {c}</span>
+                    <span style={{ color: getEffectiveClusterColor(c, i), fontSize: 11, fontWeight: 600, width: 70, flexShrink: 0 }}>Cluster {c}</span>
                     <div style={{ flex: 1, background: "#232936", borderRadius: 4, height: 10, overflow: "hidden" }}>
-                      <div style={{ width: `${pct * 100}%`, height: "100%", background: getClusterColor(i), borderRadius: 4 }} />
+                      <div style={{ width: `${pct * 100}%`, height: "100%", background: getEffectiveClusterColor(c, i), borderRadius: 4 }} />
                     </div>
                     <span style={{ fontSize: 11, color: "#8b949e", width: 36, textAlign: "right", flexShrink: 0 }}>{count}</span>
                   </div>
@@ -1748,8 +1874,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                       {[...viewClusterIds].sort().map((cid) => {
                         const ci = clusters.indexOf(Number(cid));
                         return (
-                          <span key={cid} style={{ fontSize: 10, color: getClusterColor(ci >= 0 ? ci : 0), display: "flex", alignItems: "center", gap: 3 }}>
-                            <span style={{ width: 8, height: 8, background: getClusterColor(ci >= 0 ? ci : 0), display: "inline-block", borderRadius: 1 }} />
+                          <span key={cid} style={{ fontSize: 10, color: getEffectiveClusterColor(Number(cid), ci >= 0 ? ci : 0), display: "flex", alignItems: "center", gap: 3 }}>
+                            <span style={{ width: 8, height: 8, background: getEffectiveClusterColor(Number(cid), ci >= 0 ? ci : 0), display: "inline-block", borderRadius: 1 }} />
                             {cid}
                           </span>
                         );
@@ -1810,7 +1936,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                               <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
                                 {Object.entries(clusterCounts).map(([cid, cnt]) => {
                                   const ci = clusters.indexOf(Number(cid));
-                                  return <span key={cid} title={`Cluster ${cid}: ${cnt}`} style={{ width: 8, height: 8, borderRadius: "50%", background: getClusterColor(ci >= 0 ? ci : 0) }} />;
+                                  return <span key={cid} title={`Cluster ${cid}: ${cnt}`} style={{ width: 8, height: 8, borderRadius: "50%", background: getEffectiveClusterColor(Number(cid), ci >= 0 ? ci : 0) }} />;
                                 })}
                               </div>
                             </div>
