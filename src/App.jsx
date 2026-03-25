@@ -1101,6 +1101,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [boxZoomActive, setBoxZoomActive] = useState(false);
   const [boxRect, setBoxRect] = useState(null);
   const [mode3D, setMode3D] = useState(false);
+  const [useParquetCoords, setUseParquetCoords] = useState(false);
   const [pointHeights, setPointHeights] = useState({});
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
@@ -1179,12 +1180,14 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       )
       .map((r) => {
         const h = pointHeights[r[sensorIdCol]];
-        const elevation = h
-          ? (Math.min(h.floor, h.lm_max_floor) / Math.max(h.lm_max_floor, 1)) * h.lm_height * 3
+        const elevation = h && h.lm_height != null && h.lm_max_floor != null
+          ? (Math.min(h.floor ?? 0, h.lm_max_floor) / Math.max(h.lm_max_floor, 1)) * h.lm_height * 3
           : 0;
-        return { id: r[sensorIdCol], lat: r.lat, lon: r.lon, cluster: r[selectedK], elevation };
+        const lat = (useParquetCoords && h?.lat != null) ? h.lat : r.lat;
+        const lon = (useParquetCoords && h?.lon != null) ? h.lon : r.lon;
+        return { id: r[sensorIdCol], lat, lon, cluster: r[selectedK], elevation };
       });
-  }, [metadataData, selectedK, selectedClusters, sensorIdCol, filteredIds, pointHeights]);
+  }, [metadataData, selectedK, selectedClusters, sensorIdCol, filteredIds, pointHeights, useParquetCoords]);
 
   const visibleSensors = useMemo(() => {
     if (!deckContainerRef.current) return sensorLocations;
@@ -1685,6 +1688,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           </button>
           <button onClick={toggle3D} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: mode3D ? "#E9C46A" : "#3d4555", color: mode3D ? "#E9C46A" : "#8b949e", background: mode3D ? "#E9C46A22" : "none" }}>
             ⬡ 3D{Object.keys(pointHeights).length === 0 ? " (loading…)" : ""}
+          </button>
+          <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
+            ⌖ Parquet coords
           </button>
           <select
             value={mapStyleId}
