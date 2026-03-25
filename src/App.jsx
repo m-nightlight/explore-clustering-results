@@ -1102,6 +1102,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [boxRect, setBoxRect] = useState(null);
   const [mode3D, setMode3D] = useState(false);
   const [useParquetCoords, setUseParquetCoords] = useState(false);
+  const [colorByMetric, setColorByMetric] = useState(null);
   const [pointHeights, setPointHeights] = useState({});
   const [buildings3D, setBuildings3D] = useState(null);
   const buildings3DTimerRef = useRef();
@@ -1245,6 +1246,28 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return sensorProperties.filter((s) => selectedBuildings.has(s["lm_building_id"] || "Unknown"));
   }, [sensorProperties, selectedBuildings]);
 
+  // ── Metric color map (sensor_id → [r,g,b]) for continuous coloring ──
+  const metricColorMap = useMemo(() => {
+    if (!colorByMetric || !sensorProperties) return null;
+    const vals = sensorProperties
+      .map((s) => ({ id: s.sensor_id, v: Number(s[colorByMetric]) }))
+      .filter((x) => !isNaN(x.v));
+    if (!vals.length) return null;
+    const min = Math.min(...vals.map((x) => x.v));
+    const max = Math.max(...vals.map((x) => x.v));
+    const range = max - min || 1;
+    const map = {};
+    vals.forEach(({ id, v }) => {
+      const t = (v - min) / range;
+      // cool blue → yellow → hot red
+      const r = t < 0.5 ? Math.round(76 + (255 - 76) * t * 2) : 255;
+      const g = Math.round(t < 0.5 ? 201 * (1 - t * 2) + 217 * t * 2 : 217 * (1 - (t - 0.5) * 2));
+      const b = t < 0.5 ? Math.round(240 * (1 - t * 2)) : 0;
+      map[id] = [r, g, b];
+    });
+    return map;
+  }, [colorByMetric, sensorProperties]);
+
   // ── deck.gl layers ──
   const layers = useMemo(() => {
     const ls = [];
@@ -1255,13 +1278,14 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         getSourcePosition: (d) => [d.lon, d.lat, 0],
         getTargetPosition: (d) => [d.lon, d.lat, d.elevation],
         getColor: (d) => {
-          const ci = clusters.indexOf(d.cluster);
-          const [r, g, b] = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
+          const [r, g, b] = metricColorMap
+            ? (metricColorMap[d.id] || [150, 150, 150])
+            : hexToRgb(getEffectiveClusterColor(d.cluster, clusters.indexOf(d.cluster)));
           return [r, g, b, buildingHighlightIds ? (buildingHighlightIds.has(d.id) ? 160 : 20) : 80];
         },
         getWidth: 1,
         widthUnits: "pixels",
-        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups] },
+        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups, metricColorMap] },
       }));
     }
     if (mode3D) {
@@ -1275,8 +1299,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           return [r, r, r];
         },
         getColor: (d) => {
-          const ci = clusters.indexOf(d.cluster);
-          const color = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
+          const color = metricColorMap
+            ? (metricColorMap[d.id] || [150, 150, 150])
+            : hexToRgb(getEffectiveClusterColor(d.cluster, clusters.indexOf(d.cluster)));
           const alpha = buildingHighlightIds
             ? (buildingHighlightIds.has(d.id) ? 255 : 40)
             : 220;
@@ -1285,7 +1310,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         sizeScale: 1,
         pickable: true,
         parameters: { depthTest: true },
-        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups], getScale: [buildingHighlightIds] },
+        updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups, metricColorMap], getScale: [buildingHighlightIds] },
       }));
     } else {
       ls.push(new ScatterplotLayer({
@@ -1293,8 +1318,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         data: sensorLocations,
         getPosition: (d) => [d.lon, d.lat, 0],
         getFillColor: (d) => {
-          const ci = clusters.indexOf(d.cluster);
-          const color = hexToRgb(getEffectiveClusterColor(d.cluster, ci));
+          const color = metricColorMap
+            ? (metricColorMap[d.id] || [150, 150, 150])
+            : hexToRgb(getEffectiveClusterColor(d.cluster, clusters.indexOf(d.cluster)));
           const alpha = buildingHighlightIds
             ? (buildingHighlightIds.has(d.id) ? 255 : 30)
             : 210;
@@ -1305,7 +1331,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         radiusMinPixels: buildingHighlightIds ? 3 : 2,
         radiusMaxPixels: buildingHighlightIds ? 14 : 8,
         pickable: true,
-        updateTriggers: { getFillColor: [clusters, buildingHighlightIds, clusterGroups], getRadius: [buildingHighlightIds] },
+        updateTriggers: { getFillColor: [clusters, buildingHighlightIds, clusterGroups, metricColorMap], getRadius: [buildingHighlightIds] },
       }));
     }
     if (mode3D && buildings3D?.features?.length) {
@@ -1337,7 +1363,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap]);
 
   const handleViewStateChange = useCallback(({ viewState: vs }) => setViewState({ ...vs }), []);
 
@@ -1390,6 +1416,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     setSelectedBuildings(new Set());
     setBuildingTimeseries(null);
     setBuildingGeometry(null);
+    setColorByMetric(null);
     if (!visibleSensors.length || !selectedK) return;
     setMapProfilesLoading(true);
 
@@ -1878,7 +1905,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                     <span style={{ fontSize: 11, color: "#58a6ff", flex: 1 }}>
                       ⬡ {[...selectedBuildings].join(", ")}
                     </span>
-                    <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>
+                    <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); setColorByMetric(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>
                       Clear
                     </button>
                   </div>
@@ -1909,7 +1936,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                     {selectedBuildings.size > 0 && (
                       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", background: "#1f6feb22", border: "1px solid #58a6ff55", borderRadius: 6 }}>
                         <span style={{ fontSize: 11, color: "#58a6ff", flex: 1 }}>⬡ {[...selectedBuildings].join(", ")}</span>
-                        <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>Clear</button>
+                        <button onClick={() => { setSelectedBuildings(new Set()); setBuildingTimeseries(null); setBuildingGeometry(null); setColorByMetric(null); }} style={{ ...styles.miniBtn, fontSize: 10, padding: "2px 8px", color: "#8b949e", borderColor: "#3d4555" }}>Clear</button>
                       </div>
                     )}
                     {/* Cluster legend */}
@@ -1993,6 +2020,73 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                           {selectedBuildings.size} building{selectedBuildings.size > 1 ? "s" : ""} selected
                           {buildingTimeseries ? ` · ${Object.keys(buildingTimeseries.sensors).length} sensors` : " · Loading…"}
                         </p>
+                        {activeSensorProperties?.length > 0 && (() => {
+                          const METRICS = [
+                            { key: "Kh above 26°C", label: "h > 26 °C" },
+                            { key: "Kh above 27°C", label: "h > 27 °C" },
+                            { key: "Kh above 28°C", label: "h > 28 °C" },
+                            { key: "tc_h",           label: "Comfort h" },
+                          ];
+                          return (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "6px 0 2px" }}>
+                              {colorByMetric && (
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9, color: "#8b949e" }}>
+                                  <div style={{ flex: 1, height: 6, borderRadius: 3, background: "linear-gradient(to right, #4CC9F0, #FFD93D, #FF4444)" }} />
+                                  <span>low → high</span>
+                                </div>
+                              )}
+                              {METRICS.map(({ key, label }) => {
+                                const vals = activeSensorProperties
+                                  .map((s) => s[key])
+                                  .filter((v) => v != null && !isNaN(Number(v)))
+                                  .map(Number)
+                                  .sort((a, b) => a - b);
+                                if (!vals.length) return null;
+                                const min = vals[0];
+                                const max = vals[vals.length - 1];
+                                const med = vals[Math.floor(vals.length / 2)];
+                                const range = max - min || 1;
+                                const active = colorByMetric === key;
+                                return (
+                                  <div key={key}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 1 }}>
+                                      <span style={{ fontSize: 10, color: active ? "#c9d1d9" : "#8b949e", flex: 1 }}>{label}</span>
+                                      <button
+                                        onClick={() => setColorByMetric(active ? null : key)}
+                                        title={active ? "Reset to cluster colors" : "Color spheres by this metric"}
+                                        style={{
+                                          background: active ? "#4CC9F055" : "transparent",
+                                          border: `1px solid ${active ? "#4CC9F0" : "#3d4555"}`,
+                                          borderRadius: 3, padding: "1px 5px", fontSize: 9,
+                                          color: active ? "#4CC9F0" : "#6e7681", cursor: "pointer", fontFamily: "inherit",
+                                        }}
+                                      >
+                                        {active ? "◉ on map" : "map"}
+                                      </button>
+                                    </div>
+                                    <div style={{ position: "relative", height: 14 }}>
+                                      <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: 1, background: "#2e3440" }} />
+                                      {vals.map((v, i) => (
+                                        <div key={i} style={{
+                                          position: "absolute", top: "50%",
+                                          left: `${((v - min) / range) * 100}%`,
+                                          transform: "translate(-50%, -50%)",
+                                          width: 6, height: 6, borderRadius: "50%",
+                                          background: "#58a6ff", opacity: 0.75,
+                                        }} />
+                                      ))}
+                                    </div>
+                                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#6e7681" }}>
+                                      <span>{min.toFixed(0)}</span>
+                                      <span>med {med.toFixed(0)}</span>
+                                      <span>{max.toFixed(0)}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
                         <canvas ref={buildingCanvasRef} style={{ ...styles.canvas, height: 220 }} />
                       </>
                     )}
