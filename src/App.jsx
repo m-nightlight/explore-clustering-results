@@ -1103,6 +1103,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [mode3D, setMode3D] = useState(false);
   const [useParquetCoords, setUseParquetCoords] = useState(false);
   const [pointHeights, setPointHeights] = useState({});
+  const [buildings3D, setBuildings3D] = useState(null);
+  const buildings3DTimerRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
@@ -1146,6 +1148,25 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     fetchData("/api/point-heights").then(setPointHeights).catch(() => {});
   }, []);
 
+  // Auto-fetch all building footprints when in 3D mode (debounced on viewState)
+  useEffect(() => {
+    clearTimeout(buildings3DTimerRef.current);
+    if (!mode3D || viewState.zoom < 13) { setBuildings3D(null); return; }
+    buildings3DTimerRef.current = setTimeout(() => {
+      if (!deckContainerRef.current) return;
+      const { clientWidth: w, clientHeight: h } = deckContainerRef.current;
+      try {
+        const vp = new WebMercatorViewport({ ...viewState, width: w, height: h });
+        const [west, south] = vp.unproject([0, h]);
+        const [east, north] = vp.unproject([w, 0]);
+        fetchData(`/api/buildings-in-bbox?min_lon=${west}&min_lat=${south}&max_lon=${east}&max_lat=${north}`)
+          .then(setBuildings3D)
+          .catch(() => {});
+      } catch {}
+    }, 600);
+    return () => clearTimeout(buildings3DTimerRef.current);
+  }, [mode3D, viewState]);
+
   useEffect(() => {
     const active = Object.entries(activeFilters).filter(([, s]) => s.size > 0);
     if (active.length === 0 && minBuildingFloors === 0) { setFilteredIds(null); return; }
@@ -1180,8 +1201,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       )
       .map((r) => {
         const h = pointHeights[r[sensorIdCol]];
-        const elevation = h && h.lm_height != null && h.lm_max_floor != null
-          ? (Math.min(h.floor ?? 0, h.lm_max_floor) / Math.max(h.lm_max_floor, 1)) * h.lm_height * 3
+        const elevation = h && h.lm_height != null && h.lm_max_floor != null && h.lm_max_floor > 0
+          ? (Math.min(h.floor ?? 0, h.lm_max_floor) / h.lm_max_floor) * h.lm_height
           : 0;
         const lat = (useParquetCoords && h?.lat != null) ? h.lat : r.lat;
         const lon = (useParquetCoords && h?.lon != null) ? h.lon : r.lon;
@@ -1250,7 +1271,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         mesh: SPHERE_GEOMETRY,
         getPosition: (d) => [d.lon, d.lat, d.elevation],
         getScale: (d) => {
-          const r = buildingHighlightIds?.has(d.id) ? 5 : 3;
+          const r = buildingHighlightIds?.has(d.id) ? 2.5 : 1.5;
           return [r, r, r];
         },
         getColor: (d) => {
@@ -1287,20 +1308,36 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         updateTriggers: { getFillColor: [clusters, buildingHighlightIds, clusterGroups], getRadius: [buildingHighlightIds] },
       }));
     }
+    if (mode3D && buildings3D?.features?.length) {
+      ls.push(new GeoJsonLayer({
+        id: "buildings-3d-all",
+        data: buildings3D,
+        filled: true,
+        stroked: false,
+        extruded: true,
+        getElevation: (f) => f.properties?.height ?? 10,
+        getFillColor: [100, 180, 255, 28],
+        material: { ambient: 0.5, diffuse: 0.3, shininess: 10 },
+      }));
+    }
     if (buildingGeometry?.features?.length) {
       ls.push(new GeoJsonLayer({
         id: "buildings",
         data: buildingGeometry,
         filled: true,
         stroked: true,
-        getFillColor: [88, 166, 255, 25],
-        getLineColor: [88, 166, 255, 220],
-        lineWidthMinPixels: 2,
-        lineWidthMaxPixels: 3,
+        extruded: mode3D,
+        getElevation: (f) => f.properties?.height ?? 10,
+        getFillColor: mode3D ? [88, 166, 255, 55] : [88, 166, 255, 25],
+        getLineColor: [88, 166, 255, 200],
+        lineWidthMinPixels: 1,
+        lineWidthMaxPixels: 2,
+        material: mode3D ? { ambient: 0.6, diffuse: 0.4, shininess: 20 } : undefined,
+        updateTriggers: { extruded: [mode3D], getFillColor: [mode3D] },
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, mode3D]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D]);
 
   const handleViewStateChange = useCallback(({ viewState: vs }) => setViewState({ ...vs }), []);
 

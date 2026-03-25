@@ -43,16 +43,20 @@ async def init_conn(conn):
 async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(_parse_dsn_for_asyncpg(DATABASE_URL), init=init_conn)
     try:
-        df = pd.read_parquet(POINT_HEIGHTS_PARQUET, columns=["id", "lat", "lon", "floor", "lm_height", "lm_max_floor"])
+        df = pd.read_parquet(POINT_HEIGHTS_PARQUET, columns=["id", "lat", "lon", "floor", "lm_height", "lm_max_floor", "lm_building_id", "osm_height"])
         df = df.dropna(subset=["id"]).drop_duplicates(subset=["id"])
         df["floor"] = df["floor"].clip(lower=0, upper=df["lm_max_floor"].fillna(1))
         df = df.set_index("id")
-        # astype(object) first so NaN stays as Python None after .where()
         df = df.astype(object).where(df.notna(), other=None)
         app.state.point_heights = df.to_dict("index")
+        # building_id → osm_height lookup (first non-null per building)
+        bh = df[["lm_building_id", "osm_height"]].reset_index(drop=True)
+        bh = bh.dropna(subset=["lm_building_id", "osm_height"]).drop_duplicates("lm_building_id")
+        app.state.building_osm_heights = dict(zip(bh["lm_building_id"], bh["osm_height"].astype(float)))
     except Exception as e:
         print(f"Warning: could not load point heights from parquet: {e}")
         app.state.point_heights = {}
+        app.state.building_osm_heights = {}
     yield
     await app.state.pool.close()
 
@@ -377,7 +381,9 @@ async def get_building_geometries(request: Request):
             """
             SELECT DISTINCT ON (properties->>'lm_building_id')
                 properties->>'lm_building_id' AS lm_building_id,
-                ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom
+                ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom,
+                MAX((properties->>'max_floor')::numeric)
+                    OVER (PARTITION BY properties->>'lm_building_id') AS max_floor
             FROM sensors
             WHERE properties->>'lm_building_id' = ANY($1::text[])
               AND building_geom IS NOT NULL
@@ -385,13 +391,20 @@ async def get_building_geometries(request: Request):
             """,
             ids,
         )
+    osm_heights = request.app.state.building_osm_heights
     return {
         "type": "FeatureCollection",
         "features": [
             {
                 "type": "Feature",
                 "geometry": json.loads(r["geom"]),
-                "properties": {"lm_building_id": r["lm_building_id"]},
+                "properties": {
+                    "lm_building_id": r["lm_building_id"],
+                    "height": (
+                        osm_heights.get(r["lm_building_id"])
+                        or (float(r["max_floor"]) * 3.2 if r["max_floor"] else 10.0)
+                    ),
+                },
             }
             for r in rows if r["geom"]
         ],
@@ -519,3 +532,48 @@ async def get_filtered_sensor_ids(request: Request):
 async def get_point_heights(request: Request):
     """Return per-sensor floor + building height data from the parquet export."""
     return request.app.state.point_heights
+
+
+@app.get("/api/buildings-in-bbox")
+async def get_buildings_in_bbox(
+    request: Request,
+    min_lon: float = Query(...),
+    min_lat: float = Query(...),
+    max_lon: float = Query(...),
+    max_lat: float = Query(...),
+):
+    """Return extruded building footprints (GeoJSON) for all buildings whose sensors
+    fall within the given bbox. Heights prefer osm_height from parquet, fall back to
+    max_floor * 3.2. Limited to 400 buildings."""
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (properties->>'lm_building_id')
+                properties->>'lm_building_id'          AS lm_building_id,
+                ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom,
+                MAX((properties->>'max_floor')::numeric)
+                    OVER (PARTITION BY properties->>'lm_building_id') AS max_floor
+            FROM sensors
+            WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
+              AND building_geom IS NOT NULL
+            ORDER BY properties->>'lm_building_id'
+            LIMIT 400
+            """,
+            min_lon, min_lat, max_lon, max_lat,
+        )
+    osm_heights = request.app.state.building_osm_heights
+    features = []
+    for r in rows:
+        if not r["geom"]:
+            continue
+        bid = r["lm_building_id"]
+        height = (
+            osm_heights.get(bid)
+            or (float(r["max_floor"]) * 3.2 if r["max_floor"] else 10.0)
+        )
+        features.append({
+            "type": "Feature",
+            "geometry": json.loads(r["geom"]),
+            "properties": {"lm_building_id": bid, "height": height},
+        })
+    return {"type": "FeatureCollection", "features": features}
