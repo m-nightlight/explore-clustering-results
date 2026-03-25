@@ -15,6 +15,10 @@ POINT_HEIGHTS_PARQUET = os.environ.get(
     "POINT_HEIGHTS_PARQUET",
     "/Users/matsp/phd-python-projects/coordinate_editor/points_export.parquet",
 )
+BUILDING_CLUSTERS_PARQUET = os.environ.get(
+    "BUILDING_CLUSTERS_PARQUET",
+    os.path.join(os.path.dirname(__file__), "..", "data", "meta_clusters_combined_building_level.parquet"),
+)
 
 def _parse_dsn_for_asyncpg(url: str):
     """Strip params asyncpg doesn't understand (e.g. gssencmode) from the DSN."""
@@ -31,6 +35,8 @@ CLUSTER_COLS = {
     "stage1_cluster":    "stage1_cluster",
     "stage2_subcluster": "stage2_subcluster",
 }
+# Parquet-sourced cluster columns (not in DB; handled via in-memory CTE)
+PARQUET_CLUSTER_COLS = {"building_cluster"}
 
 
 async def init_conn(conn):
@@ -57,6 +63,15 @@ async def lifespan(app: FastAPI):
         print(f"Warning: could not load point heights from parquet: {e}")
         app.state.point_heights = {}
         app.state.building_osm_heights = {}
+    try:
+        bc_df = pd.read_parquet(BUILDING_CLUSTERS_PARQUET, columns=["combined_name", "building_cluster"])
+        bc_df = bc_df.dropna(subset=["combined_name", "building_cluster"])
+        bc_df["building_cluster"] = bc_df["building_cluster"].astype(int)
+        app.state.building_cluster_map = dict(zip(bc_df["combined_name"], bc_df["building_cluster"]))
+        print(f"Loaded building_cluster for {len(app.state.building_cluster_map)} sensors")
+    except Exception as e:
+        print(f"Warning: could not load building clusters from parquet: {e}")
+        app.state.building_cluster_map = {}
     yield
     await app.state.pool.close()
 
@@ -84,9 +99,11 @@ async def generic_handler(request: Request, exc: Exception):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def validated_col(cluster_col: str) -> str:
+    if cluster_col in PARQUET_CLUSTER_COLS:
+        return cluster_col  # handled via in-memory CTE, not a DB column
     col = CLUSTER_COLS.get(cluster_col)
     if not col:
-        raise HTTPException(400, f"Invalid cluster_col. Choose from: {list(CLUSTER_COLS)}")
+        raise HTTPException(400, f"Invalid cluster_col. Choose from: {list(CLUSTER_COLS) + list(PARQUET_CLUSTER_COLS)}")
     return col
 
 
@@ -126,6 +143,103 @@ def reshape_profiles(rows) -> dict:
     return {"timestamps": timestamps, "profiles": profiles}
 
 
+async def _building_cluster_profiles(conn, bc_map: dict, cluster_list: list[int] | None) -> dict:
+    """Compute cluster profiles using building_cluster via a parallel-array CTE."""
+    pairs = [(sid, cid) for sid, cid in bc_map.items()
+             if cluster_list is None or cid in cluster_list]
+    if not pairs:
+        return {"timestamps": [], "profiles": {}}
+    sensor_ids = [p[0] for p in pairs]
+    cluster_ids = [p[1] for p in pairs]
+    rows = await conn.fetch(
+        """
+        WITH cluster_map(sensor_id, cluster_id) AS (
+            SELECT unnest($1::text[]), unnest($2::int[])
+        )
+        SELECT
+            t.ts,
+            cm.cluster_id::text                                             AS cluster_id,
+            AVG(t.temperature)                                              AS val,
+            PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY t.temperature)    AS q25,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY t.temperature)    AS q75,
+            COUNT(DISTINCT t.sensor_id)                                     AS sensor_count
+        FROM temperatures t
+        JOIN cluster_map cm ON cm.sensor_id = t.sensor_id
+        GROUP BY t.ts, cm.cluster_id
+        ORDER BY t.ts, cm.cluster_id
+        """,
+        sensor_ids, cluster_ids,
+    )
+    return reshape_profiles(rows)
+
+
+async def _building_cluster_means(conn, bc_map: dict, cluster_list: list[int] | None) -> dict:
+    """Compute cluster means only for building_cluster (used by timeseries-overview)."""
+    pairs = [(sid, cid) for sid, cid in bc_map.items()
+             if cluster_list is None or cid in cluster_list]
+    if not pairs:
+        return {"timestamps": [], "cluster_means": {}}
+    sensor_ids = [p[0] for p in pairs]
+    cluster_ids = [p[1] for p in pairs]
+    rows = await conn.fetch(
+        """
+        WITH cluster_map(sensor_id, cluster_id) AS (
+            SELECT unnest($1::text[]), unnest($2::int[])
+        )
+        SELECT
+            t.ts,
+            cm.cluster_id::text  AS cluster_id,
+            AVG(t.temperature)   AS val
+        FROM temperatures t
+        JOIN cluster_map cm ON cm.sensor_id = t.sensor_id
+        GROUP BY t.ts, cm.cluster_id
+        ORDER BY t.ts, cm.cluster_id
+        """,
+        sensor_ids, cluster_ids,
+    )
+    timestamps: list[str] = []
+    seen_ts: set[str] = set()
+    means: dict[str, list] = {}
+    for r in rows:
+        ts = r["ts"].isoformat()
+        cid = str(r["cluster_id"])
+        if ts not in seen_ts:
+            timestamps.append(ts)
+            seen_ts.add(ts)
+        means.setdefault(cid, []).append(r["val"])
+    return {"timestamps": timestamps, "cluster_means": means}
+
+
+async def _building_cluster_map_profiles(conn, bc_map: dict, sensor_ids_filter: list[str]) -> dict:
+    """Cluster profiles for a subset of sensors (viewport), using building_cluster."""
+    id_set = set(sensor_ids_filter)
+    pairs = [(sid, cid) for sid, cid in bc_map.items() if sid in id_set]
+    if not pairs:
+        return {"timestamps": [], "profiles": {}}
+    sensor_ids = [p[0] for p in pairs]
+    cluster_ids = [p[1] for p in pairs]
+    rows = await conn.fetch(
+        """
+        WITH cluster_map(sensor_id, cluster_id) AS (
+            SELECT unnest($1::text[]), unnest($2::int[])
+        )
+        SELECT
+            t.ts,
+            cm.cluster_id::text                                             AS cluster_id,
+            AVG(t.temperature)                                              AS val,
+            PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY t.temperature)    AS q25,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY t.temperature)    AS q75,
+            COUNT(DISTINCT t.sensor_id)                                     AS sensor_count
+        FROM temperatures t
+        JOIN cluster_map cm ON cm.sensor_id = t.sensor_id
+        GROUP BY t.ts, cm.cluster_id
+        ORDER BY t.ts, cm.cluster_id
+        """,
+        sensor_ids, cluster_ids,
+    )
+    return reshape_profiles(rows)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -149,6 +263,7 @@ async def get_metadata(request: Request):
             ORDER BY sensor_id
             """
         )
+    bc_map = request.app.state.building_cluster_map
     return [
         {
             "sensor_id":         r["sensor_id"],
@@ -157,6 +272,7 @@ async def get_metadata(request: Request):
             "stage1_cluster":    r["stage1_cluster"],
             "stage2_subcluster": r["stage2_subcluster"],
             "cluster":           r["cluster"],
+            "building_cluster":  bc_map.get(r["sensor_id"]),
             "domain_code":       r["domain_code"],
             "area":              r["area"],
         }
@@ -186,6 +302,10 @@ async def get_cluster_profiles(
 ):
     col          = validated_col(cluster_col)
     cluster_list = parse_clusters(clusters)
+
+    if col == "building_cluster":
+        async with request.app.state.pool.acquire() as conn:
+            return await _building_cluster_profiles(conn, request.app.state.building_cluster_map, cluster_list)
 
     # Use materialized view for mean (fast); fall back to live query only for median
     if agg != "median":
@@ -234,6 +354,10 @@ async def get_timeseries_overview(
     """Cluster means only — from materialized view."""
     col          = validated_col(cluster_col)
     cluster_list = parse_clusters(clusters)
+
+    if col == "building_cluster":
+        async with request.app.state.pool.acquire() as conn:
+            return await _building_cluster_means(conn, request.app.state.building_cluster_map, cluster_list)
 
     where = "WHERE cluster_col = $1"
     params: list = [col]
@@ -327,10 +451,17 @@ async def get_sensors_in_bbox(
             west, south, east, north, limit,
         )
 
-    sensors     = [dict(r) for r in rows]
+    bc_map = request.app.state.building_cluster_map if col == "building_cluster" else None
+    sensors: list[dict] = []
+    for r in rows:
+        s = dict(r)
+        if bc_map is not None:
+            s["building_cluster"] = bc_map.get(s["sensor_id"])
+        sensors.append(s)
+
     counts: dict = {}
     for s in sensors:
-        cid = str(s[cluster_col])
+        cid = str(s.get(cluster_col))
         counts[cid] = counts.get(cid, 0) + 1
 
     return {"sensors": sensors, "cluster_counts": counts, "truncated": len(rows) == limit}
@@ -347,6 +478,10 @@ async def get_map_cluster_profiles(
     ids = [s.strip() for s in sensor_ids.split(",") if s.strip()]
     if not ids:
         raise HTTPException(400, "sensor_ids required")
+
+    if col == "building_cluster":
+        async with request.app.state.pool.acquire() as conn:
+            return await _building_cluster_map_profiles(conn, request.app.state.building_cluster_map, ids)
 
     query = f"""
         SELECT
@@ -429,6 +564,7 @@ async def get_sensors_properties_batch(request: Request):
             """,
             ids,
         )
+    bc_map = request.app.state.building_cluster_map
     return [
         {
             "sensor_id": r["sensor_id"],
@@ -439,6 +575,7 @@ async def get_sensors_properties_batch(request: Request):
             "stage1_cluster": r["stage1_cluster"],
             "stage2_subcluster": r["stage2_subcluster"],
             "cluster": r["cluster"],
+            "building_cluster": bc_map.get(r["sensor_id"]),
             **(r["properties"] or {}),
         }
         for r in rows
