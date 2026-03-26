@@ -73,6 +73,10 @@ export default function App() {
   const [groupingMode, setGroupingMode] = useState(false);
   const [pendingGroupMembers, setPendingGroupMembers] = useState(new Set());
 
+  // ── Custom CSV cluster columns ──
+  const [customClusterCols, setCustomClusterCols] = useState({});
+  const csvInputRef = useRef();
+
   // Derive cluster columns from metadata
   useEffect(() => {
     if (!metadataData || metadataData.length === 0) return;
@@ -1200,8 +1204,6 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [mode3D, setMode3D] = useState(false);
   const [useParquetCoords, setUseParquetCoords] = useState(false);
   const [colorByMetric, setColorByMetric] = useState(null);
-  const [customClusterCols, setCustomClusterCols] = useState({});
-  const csvInputRef = useRef();
   const [pointHeights, setPointHeights] = useState({});
   const [buildings3D, setBuildings3D] = useState(null);
   const buildings3DTimerRef = useRef();
