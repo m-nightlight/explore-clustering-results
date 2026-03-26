@@ -178,6 +178,62 @@ export default function App() {
   const selectAllClusters = () => setSelectedClusters(new Set(clusters));
   const selectNoneClusters = () => setSelectedClusters(new Set());
 
+  // ── Custom CSV cluster columns ──
+  const parseClusterCSV = (text) => {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) throw new Error("CSV must have a header and at least one data row");
+    const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
+    const nameIdx = headers.findIndex((h) => h.toLowerCase() === "combined_name");
+    if (nameIdx === -1) throw new Error('CSV must have a "combined_name" column');
+    const clusterIdx = headers.findIndex((_, i) => i !== nameIdx);
+    if (clusterIdx === -1) throw new Error("CSV must have at least two columns");
+    const colName = headers[clusterIdx];
+    const mapping = {};
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(",").map((p) => p.trim().replace(/^"|"$/g, ""));
+      const sensorId = parts[nameIdx];
+      const raw = parts[clusterIdx];
+      if (sensorId && raw !== "" && raw != null) {
+        mapping[sensorId] = parseInt(raw, 10);
+      }
+    }
+    if (Object.keys(mapping).length === 0) throw new Error("No valid rows found in CSV");
+    return { colName, mapping };
+  };
+
+  const addCustomClusterCol = (colName, mapping) => {
+    setCustomClusterCols((prev) => ({ ...prev, [colName]: mapping }));
+    setMetadataData((prev) => prev.map((r) => ({ ...r, [colName]: mapping[r.sensor_id] ?? null })));
+    setClusterColumns((prev) => (prev.includes(colName) ? prev : [...prev, colName]));
+  };
+
+  const removeCustomClusterCol = (colName) => {
+    setCustomClusterCols((prev) => { const next = { ...prev }; delete next[colName]; return next; });
+    setMetadataData((prev) => prev.map((r) => { const next = { ...r }; delete next[colName]; return next; }));
+    setClusterColumns((prev) => prev.filter((c) => c !== colName));
+    if (selectedK === colName) setSelectedK(clusterColumns.find((c) => c !== colName) ?? null);
+  };
+
+  const handleCSVFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const { colName, mapping } = parseClusterCSV(ev.target.result);
+        // If a col with the same name already exists, suffix it
+        const finalName = metadataData && Object.keys(metadataData[0] || {}).includes(colName)
+          ? `${colName}_csv`
+          : colName;
+        addCustomClusterCol(finalName, mapping);
+      } catch (err) {
+        alert(`CSV import failed: ${err.message}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
   // Map clusterID → group index for fast lookup
   const clusterToGroupIdx = useMemo(() => {
     const map = {};
@@ -234,6 +290,16 @@ export default function App() {
                 ))}
               </select>
               <span style={styles.kBadge}>{clusters.length} clusters</span>
+              {Object.keys(customClusterCols).map((colName) => (
+                <button
+                  key={colName}
+                  onClick={() => removeCustomClusterCol(colName)}
+                  title={`Remove custom column "${colName}"`}
+                  style={{ ...styles.miniBtn, borderColor: "#4CC9F0", color: "#4CC9F0", fontSize: 9 }}
+                >
+                  {colName} ×
+                </button>
+              ))}
             </div>
           )}
         </div>
@@ -284,6 +350,14 @@ export default function App() {
               >
                 ⊕ Group
               </button>
+              <button
+                onClick={() => csvInputRef.current?.click()}
+                title="Import a CSV with combined_name + cluster column"
+                style={{ ...styles.miniBtn }}
+              >
+                ⊕ CSV
+              </button>
+              <input ref={csvInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleCSVFileChange} />
               {groupingMode && pendingGroupMembers.size >= 2 && (
                 <button onClick={createGroup} style={{ ...styles.miniBtn, borderColor: "#6BCB77", color: "#6BCB77", background: "#6BCB7722" }}>
                   ✓ Create ({pendingGroupMembers.size})
@@ -352,6 +426,7 @@ export default function App() {
                 selectedClusters={selectedClusters}
                 clusterGroups={clusterGroups}
                 getEffectiveClusterColor={getEffectiveClusterColor}
+                customColMapping={customClusterCols[selectedK] ?? null}
               />
             )}
             {activeTab === "timeseries" && (
@@ -361,6 +436,7 @@ export default function App() {
                 selectedClusters={selectedClusters}
                 sensorClusterMap={sensorClusterMap}
                 sensorList={sensorList}
+                customColMapping={customClusterCols[selectedK] ?? null}
               />
             )}
             {activeTab === "map" && (
@@ -392,7 +468,7 @@ export default function App() {
 
 
 // ─── Cluster Profiles ────────────────────────────────────────────
-function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups = [], getEffectiveClusterColor = getClusterColor }) {
+function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups = [], getEffectiveClusterColor = getClusterColor, customColMapping = null }) {
   const [profileType, setProfileType] = useState("mean");
   const [profiles, setProfiles] = useState(null);
   const [profilesLoading, setProfilesLoading] = useState(false);
@@ -402,13 +478,20 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups 
     if (!selectedK) return;
     const controller = new AbortController();
     setProfilesLoading(true);
-    const params = new URLSearchParams({ cluster_col: selectedK, agg: profileType });
-    fetch(`${API}/api/cluster-profiles?${params}`, { signal: controller.signal })
+    const req = customColMapping
+      ? fetch(`${API}/api/custom-cluster-profiles`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mapping: customColMapping }),
+          signal: controller.signal,
+        })
+      : fetch(`${API}/api/cluster-profiles?${new URLSearchParams({ cluster_col: selectedK, agg: profileType })}`, { signal: controller.signal });
+    req
       .then((r) => r.json())
       .then((data) => { setProfiles(data); setProfilesLoading(false); })
       .catch((e) => { if (e.name !== "AbortError") setProfilesLoading(false); });
     return () => controller.abort();
-  }, [selectedK, profileType]);
+  }, [selectedK, profileType, customColMapping]);
 
   // Draw with canvas for performance
   useEffect(() => {
@@ -587,7 +670,7 @@ function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups 
 }
 
 // ─── Time Series View ────────────────────────────────────────────
-function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMap, sensorList }) {
+function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMap, sensorList, customColMapping = null }) {
   const canvasRef = useRef();
   const drillCanvasRef = useRef();
   const [showIndividual, setShowIndividual] = useState(false);
@@ -605,13 +688,20 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     if (!selectedK) return;
     const controller = new AbortController();
     setOverviewLoading(true);
-    const params = new URLSearchParams({ cluster_col: selectedK });
-    fetch(`${API}/api/timeseries-overview?${params}`, { signal: controller.signal })
+    const req = customColMapping
+      ? fetch(`${API}/api/custom-timeseries-overview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mapping: customColMapping }),
+          signal: controller.signal,
+        })
+      : fetch(`${API}/api/timeseries-overview?${new URLSearchParams({ cluster_col: selectedK })}`, { signal: controller.signal });
+    req
       .then((r) => r.json())
       .then((data) => { setOverviewData(data); setOverviewLoading(false); })
       .catch((e) => { if (e.name !== "AbortError") setOverviewLoading(false); });
     return () => controller.abort();
-  }, [selectedK]);
+  }, [selectedK, customColMapping]);
 
   // Fetch individual sensor data when selection changes
   useEffect(() => {
@@ -627,13 +717,20 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
   useEffect(() => {
     if (!selectedK) return;
     const controller = new AbortController();
-    const params = new URLSearchParams({ cluster_col: selectedK });
-    fetch(`${API}/api/cluster-profiles?${params}`, { signal: controller.signal })
+    const req = customColMapping
+      ? fetch(`${API}/api/custom-cluster-profiles`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mapping: customColMapping }),
+          signal: controller.signal,
+        })
+      : fetch(`${API}/api/cluster-profiles?${new URLSearchParams({ cluster_col: selectedK })}`, { signal: controller.signal });
+    req
       .then((r) => r.json())
       .then(setAllDrillProfiles)
       .catch(() => {});
     return () => controller.abort();
-  }, [selectedK]);
+  }, [selectedK, customColMapping]);
 
   // Fetch individual sensor timeseries for selected drill clusters
   useEffect(() => {
@@ -1103,6 +1200,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [mode3D, setMode3D] = useState(false);
   const [useParquetCoords, setUseParquetCoords] = useState(false);
   const [colorByMetric, setColorByMetric] = useState(null);
+  const [customClusterCols, setCustomClusterCols] = useState({});
+  const csvInputRef = useRef();
   const [pointHeights, setPointHeights] = useState({});
   const [buildings3D, setBuildings3D] = useState(null);
   const buildings3DTimerRef = useRef();
@@ -1129,13 +1228,21 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   useEffect(() => {
     if (!selectedK) return;
     const controller = new AbortController();
-    const params = new URLSearchParams({ cluster_col: selectedK });
-    fetch(`${API}/api/cluster-profiles?${params}`, { signal: controller.signal })
+    const customMap = customClusterCols[selectedK];
+    const req = customMap
+      ? fetch(`${API}/api/custom-cluster-profiles`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mapping: customMap }),
+          signal: controller.signal,
+        })
+      : fetch(`${API}/api/cluster-profiles?${new URLSearchParams({ cluster_col: selectedK })}`, { signal: controller.signal });
+    req
       .then((r) => r.json())
       .then(setAllClusterProfiles)
       .catch(() => {});
     return () => controller.abort();
-  }, [selectedK]);
+  }, [selectedK, customClusterCols]);
 
   // ── Filters ──
   const [filterOptions, setFilterOptions] = useState(null);
@@ -1432,13 +1539,20 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       setMapProfilesLoading(false);
 
     // Fetch full properties for stats/buildings (capped at 500)
+    const customMap = customClusterCols[selectedK];
     fetch(`${API}/api/sensors-properties`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sensor_ids: allIds.slice(0, 500) }),
     })
       .then((r) => r.json())
-      .then((data) => { if (Array.isArray(data)) setSensorProperties(data); else console.error("sensors-properties:", data); })
+      .then((data) => {
+        if (!Array.isArray(data)) { console.error("sensors-properties:", data); return; }
+        const enriched = customMap
+          ? data.map((s) => ({ ...s, [selectedK]: customMap[s.sensor_id] ?? null }))
+          : data;
+        setSensorProperties(enriched);
+      })
       .catch((e) => console.error("sensors-properties fetch failed:", e));
   };
 

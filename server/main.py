@@ -504,6 +504,38 @@ async def get_map_cluster_profiles(
     return reshape_profiles(rows)
 
 
+@app.post("/api/custom-cluster-profiles")
+async def custom_cluster_profiles(request: Request):
+    """Compute cluster profiles from a caller-supplied sensor→cluster mapping (POST body).
+
+    Body: { "mapping": {"sensor_id": cluster_int, ...} }
+    Returns same shape as /api/cluster-profiles.
+    """
+    body = await request.json()
+    raw = body.get("mapping", {})
+    if not raw:
+        return {"timestamps": [], "profiles": {}}
+    mapping = {str(k): int(v) for k, v in raw.items() if v is not None}
+    async with request.app.state.pool.acquire() as conn:
+        return await _building_cluster_profiles(conn, mapping, None)
+
+
+@app.post("/api/custom-timeseries-overview")
+async def custom_timeseries_overview(request: Request):
+    """Compute cluster means from a caller-supplied sensor→cluster mapping (POST body).
+
+    Body: { "mapping": {"sensor_id": cluster_int, ...} }
+    Returns same shape as /api/timeseries-overview.
+    """
+    body = await request.json()
+    raw = body.get("mapping", {})
+    if not raw:
+        return {"timestamps": [], "cluster_means": {}}
+    mapping = {str(k): int(v) for k, v in raw.items() if v is not None}
+    async with request.app.state.pool.acquire() as conn:
+        return await _building_cluster_means(conn, mapping, None)
+
+
 @app.post("/api/building-geometries")
 async def get_building_geometries(request: Request):
     """Return GeoJSON FeatureCollection for up to 50 buildings (POST body: {lm_building_ids: [...]})."""
