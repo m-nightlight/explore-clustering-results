@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, GeoJsonLayer, LineLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
@@ -1213,6 +1213,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const buildings3DTimerRef = useRef();
 
   const [sunTimeIdx, setSunTimeIdx] = useState(null); // index into allClusterProfiles.timestamps
+  const [showGroundPlane, setShowGroundPlane] = useState(false);
+  const [groundPlane, setGroundPlane] = useState(null);
+  const groundPlaneTimerRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
@@ -1282,6 +1285,32 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     }, 600);
     return () => clearTimeout(buildings3DTimerRef.current);
   }, [mode3D, viewState]);
+
+  // Ground plane polygon — covers the viewport so building shadows fall on deck.gl geometry.
+  // The Mapbox basemap is rendered separately and can't receive deck.gl shadows.
+  useEffect(() => {
+    clearTimeout(groundPlaneTimerRef.current);
+    if (!mode3D || !showGroundPlane) { setGroundPlane(null); return; }
+    groundPlaneTimerRef.current = setTimeout(() => {
+      if (!deckContainerRef.current) return;
+      const { clientWidth: w, clientHeight: h } = deckContainerRef.current;
+      try {
+        const vp = new WebMercatorViewport({ ...viewState, width: w, height: h });
+        const [west, south] = vp.unproject([0, h]);
+        const [east, north] = vp.unproject([w, 0]);
+        // Pad 60% beyond viewport edges so the plane edge doesn't pop into view while panning.
+        const dLon = (east - west) * 0.6;
+        const dLat = (north - south) * 0.6;
+        setGroundPlane([[
+          [west - dLon, south - dLat],
+          [east + dLon, south - dLat],
+          [east + dLon, north + dLat],
+          [west - dLon, north + dLat],
+        ]]);
+      } catch {}
+    }, 200);
+    return () => clearTimeout(groundPlaneTimerRef.current);
+  }, [mode3D, showGroundPlane, viewState]);
 
   useEffect(() => {
     const active = Object.entries(activeFilters).filter(([, s]) => s.size > 0);
@@ -1442,6 +1471,17 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   // ── deck.gl layers ──
   const layers = useMemo(() => {
     const ls = [];
+    // Ground plane must be first so buildings render on top of it.
+    if (mode3D && showGroundPlane && groundPlane) {
+      ls.push(new SolidPolygonLayer({
+        id: "ground-plane",
+        data: [groundPlane],
+        getPolygon: d => d,
+        getFillColor: [100, 110, 120, 80],
+        material: { ambient: 0.35, diffuse: 0.6, shininess: 0, specularColor: [0, 0, 0] },
+        extruded: false,
+      }));
+    }
     if (mode3D) {
       ls.push(new LineLayer({
         id: "sensor-struts",
@@ -1535,7 +1575,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showGroundPlane, groundPlane]);
 
   const handleViewStateChange = useCallback(({ viewState: vs }) => setViewState({ ...vs }), []);
 
@@ -1933,6 +1973,11 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           <button onClick={toggle3D} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: mode3D ? "#E9C46A" : "#3d4555", color: mode3D ? "#E9C46A" : "#8b949e", background: mode3D ? "#E9C46A22" : "none" }}>
             ⬡ 3D{Object.keys(pointHeights).length === 0 ? " (loading…)" : ""}
           </button>
+          {mode3D && (
+            <button onClick={() => setShowGroundPlane(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showGroundPlane ? "#E9C46A" : "#3d4555", color: showGroundPlane ? "#E9C46A" : "#8b949e", background: showGroundPlane ? "#E9C46A22" : "none" }}>
+              ⬜ Ground
+            </button>
+          )}
           <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
             ⌖ Parquet coords
           </button>
