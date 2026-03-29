@@ -7,7 +7,7 @@ import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { getSunInfo } from "./utils/sunPosition";
+import { getSunInfo, getSunPath } from "./utils/sunPosition";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -1215,6 +1215,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [sunTimeIdx, setSunTimeIdx] = useState(null); // index into allClusterProfiles.timestamps
   const [showGroundPlane, setShowGroundPlane] = useState(false);
   const [groundPlane, setGroundPlane] = useState(null);
+  const [showSunArc, setShowSunArc] = useState(false);
   const groundPlaneTimerRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
@@ -1442,9 +1443,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     // dayT: 0 at horizon, 1 at 45°+ — drives mid-day intensity.
     const dayT = Math.max(0, Math.min(1, alt / 45));
 
-    // Ambient: 1.5 in deep night (keeps buildings visible given material.ambient=0.35),
-    // blends down to 0.4 at noon.
-    const ambientIntensity = (1 - horizonBlend) * 1.5 + horizonBlend * (0.8 - dayT * 0.4);
+    // Ambient: 0.8 at night/horizon, 0.4 at noon. No night boost — level never rises
+    // below horizon, so there is no brightness bump when the sun sets.
+    const ambientIntensity = 0.8 - dayT * 0.4;
 
     // Sun: zero in deep night, ramps up through dawn to 2.0 at high elevation.
     const sunIntensity = horizonBlend * (0.8 + dayT * 1.2);
@@ -1466,6 +1467,78 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     const sunLight = new SunLight({ timestamp: sunTimestampMs, color: sunColor, intensity: sunIntensity });
     return new LightingEffect({ ambientLight, sunLight });
   }, [sunInfo, sunTimestampMs]);
+
+  // ── Sun arc layers (3D sky dome showing today's sun path) ──
+  const sunArcLayers = useMemo(() => {
+    if (!showSunArc || !mode3D) return [];
+
+    const R = 800; // sky dome radius in metres
+    const DEG2RAD = Math.PI / 180;
+    const clat = viewState.latitude;
+    const clng = viewState.longitude;
+    const mPerDegLat = 111320;
+    const mPerDegLng = 111320 * Math.cos(clat * DEG2RAD);
+
+    // Convert azimuth (°, N=0 CW) + altitude (°) → [lng, lat, elevation_m]
+    const toPos = (azimuth, altitude) => {
+      const az  = azimuth  * DEG2RAD;
+      const alt = altitude * DEG2RAD;
+      const horiz = R * Math.cos(alt);
+      return [
+        clng + (horiz * Math.sin(az)) / mPerDegLng,
+        clat + (horiz * Math.cos(az)) / mPerDegLat,
+        Math.max(0, R * Math.sin(alt)),
+      ];
+    };
+
+    const path = getSunPath(sunTimestampMs);
+    if (!path.length) return [];
+
+    // Build per-segment data so each segment can be colour-coded by altitude
+    const segments = [];
+    for (let i = 0; i < path.length - 1; i++) {
+      segments.push({
+        from: toPos(path[i].azimuth, path[i].altitude),
+        to:   toPos(path[i + 1].azimuth, path[i + 1].altitude),
+        alt:  (path[i].altitude + path[i + 1].altitude) / 2,
+      });
+    }
+
+    const arcLayer = new LineLayer({
+      id: "sun-path-arc",
+      data: segments,
+      getSourcePosition: (d) => d.from,
+      getTargetPosition: (d) => d.to,
+      getColor: (d) => {
+        // orange at horizon → yellow-white at peak altitude (~50° midsummer)
+        const t = Math.max(0, Math.min(1, d.alt / 50));
+        return [255, Math.round(120 + t * 120), Math.round(t * 30), 210];
+      },
+      getWidth: 3,
+      widthUnits: "pixels",
+      widthMinPixels: 2,
+    });
+
+    const ls = [arcLayer];
+
+    // Bright disc at the current sun position (only when above horizon)
+    if (sunInfo.isAboveHorizon) {
+      ls.push(new ScatterplotLayer({
+        id: "sun-marker",
+        data: [{ position: toPos(sunInfo.azimuth, sunInfo.altitude) }],
+        getPosition: (d) => d.position,
+        getFillColor: [255, 230, 60, 255],
+        getLineColor:  [255, 255, 255, 180],
+        stroked: true,
+        lineWidthMinPixels: 2,
+        getRadius: 14,
+        radiusUnits: "pixels",
+        parameters: { depthTest: false }, // always on top — not occluded by buildings
+      }));
+    }
+
+    return ls;
+  }, [showSunArc, mode3D, sunTimestampMs, sunInfo, viewState.latitude, viewState.longitude]);
 
   // ── deck.gl layers ──
   const layers = useMemo(() => {
@@ -1977,6 +2050,11 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
               ⬜ Ground
             </button>
           )}
+          {mode3D && (
+            <button onClick={() => setShowSunArc(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showSunArc ? "#E9C46A" : "#3d4555", color: showSunArc ? "#E9C46A" : "#8b949e", background: showSunArc ? "#E9C46A22" : "none" }}>
+              ☀ Sun arc
+            </button>
+          )}
           <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
             ⌖ Parquet coords
           </button>
@@ -2055,7 +2133,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           <DeckGL
             viewState={viewState}
             controller={!boxZoomActive}
-            layers={layers}
+            layers={[...layers, ...sunArcLayers]}
             effects={mode3D ? [lightingEffect] : []}
             onViewStateChange={handleViewStateChange}
             glOptions={{ webgl2: true }}
