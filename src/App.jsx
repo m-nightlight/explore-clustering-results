@@ -1514,7 +1514,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         stroked: false,
         extruded: true,
         getElevation: (f) => f.properties?.height ?? 10,
-        getFillColor: [100, 180, 255, 28],
+        getFillColor: [100, 180, 255, 170],
         material: { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
       }));
     }
@@ -1526,7 +1526,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         stroked: true,
         extruded: mode3D,
         getElevation: (f) => f.properties?.height ?? 10,
-        getFillColor: mode3D ? [88, 166, 255, 55] : [88, 166, 255, 25],
+        getFillColor: mode3D ? [88, 166, 255, 180] : [88, 166, 255, 25],
         getLineColor: [88, 166, 255, 200],
         lineWidthMinPixels: 1,
         lineWidthMaxPixels: 2,
@@ -1544,8 +1544,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       const next = !prev;
       setViewState((vs) => ({
         ...vs,
-        pitch: next ? 45 : 0,
-        bearing: next ? vs.bearing : 0,
+        // When turning 3D off, flatten the view. When turning on, keep current
+        // pitch so top-down (pitch 0) stays top-down — shadows are visible there.
+        ...(!next && { pitch: 0, bearing: 0 }),
         transitionDuration: 500,
         transitionInterpolator: new FlyToInterpolator(),
       }));
