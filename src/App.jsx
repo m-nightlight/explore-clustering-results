@@ -1216,6 +1216,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [showGroundPlane, setShowGroundPlane] = useState(false);
   const [groundPlane, setGroundPlane] = useState(null);
   const [showSunArc, setShowSunArc] = useState(false);
+  const [wideMap, setWideMap] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1); // steps per second
   const playIntervalRef = useRef(null);
@@ -2050,9 +2051,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   if (!metadataData) return <div style={styles.emptyState}><p style={styles.emptyIcon}>◉</p><p>No metadata available</p></div>;
 
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+    <div style={{ display: "flex", flexDirection: wideMap ? "column" : "row", gap: 16, alignItems: "flex-start" }}>
       {/* Map column */}
-      <div style={{ flex: "0 0 50%" }}>
+      <div style={{ flex: wideMap ? "0 0 100%" : "0 0 50%", width: wideMap ? "100%" : undefined }}>
         {/* Toolbar */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
           <p style={{ ...styles.mapInfo, margin: 0 }}>{sensorLocations.length.toLocaleString()} sensors • {visibleSensors.length.toLocaleString()} in view</p>
@@ -2080,6 +2081,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           )}
           <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
             ⌖ Parquet coords
+          </button>
+          <button onClick={() => setWideMap((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: wideMap ? "#58a6ff" : "#3d4555", color: wideMap ? "#58a6ff" : "#8b949e", background: wideMap ? "#58a6ff22" : "none" }}>
+            ⛶ Wide
           </button>
           <select
             value={mapStyleId}
@@ -2130,7 +2134,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
               style={{ flex: 1, accentColor: "#E9C46A", cursor: "pointer" }}
             />
             <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "monospace" }}>
-              {String(allClusterProfiles.timestamps[sunTimeIdx ?? 0]).slice(0, 16)}
+              {new Date(allClusterProfiles.timestamps[sunTimeIdx ?? 0]).toLocaleString("sv-SE", { timeZone: "Europe/Stockholm", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
             </span>
           </div>
         )}
@@ -2178,7 +2182,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         )}
 
         {/* DeckGL map */}
-        <div ref={deckContainerRef} style={{ height: 560, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440", position: "relative" }}>
+        <div ref={deckContainerRef} style={{ height: wideMap ? 700 : 560, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440", position: "relative" }}>
           <DeckGL
             viewState={viewState}
             controller={!boxZoomActive}
@@ -2252,7 +2256,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       </div>
 
       {/* Side panel */}
-      <div style={{ flex: "0 0 calc(50% - 16px)", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ flex: wideMap ? "0 0 100%" : "0 0 calc(50% - 16px)", width: wideMap ? "100%" : undefined, display: "flex", flexDirection: "column", gap: 10 }}>
         {!analysedSensors ? (
           <p style={styles.mapInfo}>Set your view and click "Analyse view" to inspect the area.</p>
         ) : (
