@@ -1436,35 +1436,32 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const lightingEffect = useMemo(() => {
     const alt = sunInfo.altitude; // degrees above horizon
 
-    // t: 0 at horizon/below, 1 at 45° and above — drives all intensity curves.
+    // t: 0 at horizon/below, 1 at 45°+ — drives all intensity curves.
     const t = Math.max(0, Math.min(1, alt / 45));
 
-    // Ambient fills shadowed surfaces. Higher when sun is low so buildings
-    // stay readable; drops at noon for maximum shadow contrast.
-    const ambientIntensity = alt <= 0 ? 0.80 : 0.60 - t * 0.25; // 0.60 → 0.35
+    // Ambient: high at night so buildings stay visible (material.ambient = 0.35,
+    // so effective brightness = ambientIntensity × 0.35 — keep above ~0.5 at night).
+    // Drops toward noon to widen contrast with the directional component.
+    const ambientIntensity = alt <= 0 ? 1.5 : 0.8 - t * 0.4; // night 1.5, day 0.8→0.4
 
-    // Sun intensity ramps from 0 at/below horizon up to 2.0 at high elevation.
-    // Keeping it modest at low angles avoids harsh low-angle clipping artefacts.
-    const sunIntensity = alt <= 0 ? 0.0 : 0.8 + t * 1.2; // 0.80 → 2.0
+    // Sun: keep a small minimum at night so faces have some directional contrast
+    // and buildings don't look completely flat.
+    const sunIntensity = alt <= 0 ? 0.2 : 0.8 + t * 1.2; // night 0.2, day 0.8→2.0
 
-    // Sun colour warms toward the horizon (golden hour).
-    // High sun: [255, 255, 230] warm white.  Horizon: [255, 175, 80] deep gold.
+    // Colour: gold at the horizon warming to near-white at high elevation;
+    // cool blue-white at night.
     const sunColor = alt <= 0
-      ? [255, 255, 255]
+      ? [200, 220, 255]
       : [255, Math.round(175 + t * 80), Math.round(80 + t * 150)];
 
-    // Disable shadow casting below 5° elevation — the shadow frustum stretches
-    // to near-infinity at shallow angles and deck.gl clips most cast shadows,
-    // leaving artefacts. Ambient-only is cleaner for those extreme low-angle cases.
-    const enableShadow = alt > 5;
+    // NOTE: _shadow is intentionally omitted. deck.gl v9's experimental shadow
+    // system injects shadow shader code into all layer pipelines and causes
+    // consistent "Bad texture binding for shadow_uShadowMap0" errors on
+    // SimpleMeshLayer and SolidPolygonLayer sublayers that can't be suppressed
+    // at the application level. Directional shading on building faces still works.
 
     const ambientLight = new AmbientLight({ color: [255, 255, 255], intensity: ambientIntensity });
-    const sunLight = new SunLight({
-      timestamp: sunTimestampMs,
-      color: sunColor,
-      intensity: sunIntensity,
-      _shadow: enableShadow,
-    });
+    const sunLight = new SunLight({ timestamp: sunTimestampMs, color: sunColor, intensity: sunIntensity });
     return new LightingEffect({ ambientLight, sunLight });
   }, [sunInfo, sunTimestampMs]);
 
