@@ -1436,23 +1436,25 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const lightingEffect = useMemo(() => {
     const alt = sunInfo.altitude; // degrees above horizon
 
-    // t: 0 at horizon/below, 1 at 45°+ — drives all intensity curves.
-    const t = Math.max(0, Math.min(1, alt / 45));
+    // horizonBlend: 0 below -5°, ramps to 1 above +5° — smooth dusk/dawn transition.
+    // Without this, ambient jumps hard at alt=0 and creates a visible "light bump".
+    const horizonBlend = Math.max(0, Math.min(1, (alt + 5) / 10));
+    // dayT: 0 at horizon, 1 at 45°+ — drives mid-day intensity.
+    const dayT = Math.max(0, Math.min(1, alt / 45));
 
-    // Ambient: high at night so buildings stay visible (material.ambient = 0.35,
-    // so effective brightness = ambientIntensity × 0.35 — keep above ~0.5 at night).
-    // Drops toward noon to widen contrast with the directional component.
-    const ambientIntensity = alt <= 0 ? 1.5 : 0.8 - t * 0.4; // night 1.5, day 0.8→0.4
+    // Ambient: 1.5 in deep night (keeps buildings visible given material.ambient=0.35),
+    // blends down to 0.4 at noon.
+    const ambientIntensity = (1 - horizonBlend) * 1.5 + horizonBlend * (0.8 - dayT * 0.4);
 
-    // Sun: keep a small minimum at night so faces have some directional contrast
-    // and buildings don't look completely flat.
-    const sunIntensity = alt <= 0 ? 0.2 : 0.8 + t * 1.2; // night 0.2, day 0.8→2.0
+    // Sun: zero in deep night, ramps up through dawn to 2.0 at high elevation.
+    const sunIntensity = horizonBlend * (0.8 + dayT * 1.2);
 
-    // Colour: gold at the horizon warming to near-white at high elevation;
-    // cool blue-white at night.
-    const sunColor = alt <= 0
-      ? [200, 220, 255]
-      : [255, Math.round(175 + t * 80), Math.round(80 + t * 150)];
+    // Colour: cool blue-white night → deep gold at horizon → warm white noon.
+    const sunColor = [
+      Math.min(255, Math.round(200 + horizonBlend * 55)),                       // 200 → 255
+      Math.min(255, Math.round(220 + horizonBlend * (dayT * 80 - 45))),         // 220 → 175 → 255
+      Math.min(255, Math.round(255 + horizonBlend * (dayT * 150 - 175))),       // 255 → 80 → 230
+    ];
 
     // NOTE: _shadow is intentionally omitted. deck.gl v9's experimental shadow
     // system injects shadow shader code into all layer pipelines and causes
@@ -2086,26 +2088,26 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
               padding: "5px 10px", fontFamily: "monospace", fontSize: 11, color: "#c9d1d9",
               pointerEvents: "none", whiteSpace: "nowrap",
             }}>
-              {sunInfo.isAboveHorizon ? (
-                <>
-                  <span style={{ color: "#E9C46A" }}>☀</span>
-                  {" "}
-                  <span style={{ color: "#8b949e" }}>
-                    {new Date(sunTimestampMs).toLocaleTimeString("sv-SE", { timeZone: "Europe/Stockholm", hour: "2-digit", minute: "2-digit" })} CEST
-                  </span>
-                  {" | "}Az: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.azimuth)}°</span>
-                  {" | "}El: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.altitude)}°</span>
-                </>
-              ) : (
-                <>
-                  <span style={{ color: "#8b949e" }}>🌙</span>
-                  {" "}
-                  <span style={{ color: "#8b949e" }}>
-                    {new Date(sunTimestampMs).toLocaleTimeString("sv-SE", { timeZone: "Europe/Stockholm", hour: "2-digit", minute: "2-digit" })} CEST
-                  </span>
-                  {" | "}<span style={{ color: "#636e7b" }}>Below horizon</span>
-                </>
-              )}
+              {(() => {
+                const d = new Date(sunTimestampMs);
+                const fmt = (opts) => d.toLocaleString("en-GB", { timeZone: "Europe/Stockholm", ...opts });
+                const dateTime = fmt({ day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+                const tz = fmt({ timeZoneName: "short" }).split(" ").at(-1); // "CET" or "CEST"
+                return sunInfo.isAboveHorizon ? (
+                  <>
+                    <span style={{ color: "#E9C46A" }}>☀</span>
+                    {" "}<span style={{ color: "#8b949e" }}>{dateTime} {tz}</span>
+                    {" | "}Az: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.azimuth)}°</span>
+                    {" | "}El: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.altitude)}°</span>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ color: "#8b949e" }}>🌙</span>
+                    {" "}<span style={{ color: "#8b949e" }}>{dateTime} {tz}</span>
+                    {" | "}<span style={{ color: "#636e7b" }}>Below horizon</span>
+                  </>
+                );
+              })()}
             </div>
           )}
 
