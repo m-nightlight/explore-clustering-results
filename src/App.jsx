@@ -10,18 +10,9 @@ import "mapbox-gl/dist/mapbox-gl.css";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 
-// ── Solar lighting ────────────────────────────────────────────────────────────
-// SunLight uses the viewport's lat/lon to compute sun direction automatically.
-// _shadow: true enables shadow casting on extruded layers (experimental API).
-// Timestamp is hardcoded to June 21 at solar noon UTC for initial setup.
-const ambientLight = new AmbientLight({ color: [255, 255, 255], intensity: 0.4 });
-const sunLight = new SunLight({
-  timestamp: Date.UTC(2024, 5, 21, 12),
-  color: [255, 255, 230],
-  intensity: 2.0,
-  _shadow: true,
-});
-const lightingEffect = new LightingEffect({ ambientLight, sunLight });
+// AmbientLight is constant — created once outside the component.
+// SunLight + LightingEffect are reactive and built inside MapView via useMemo.
+const AMBIENT_LIGHT = new AmbientLight({ color: [255, 255, 255], intensity: 0.4 });
 const MAP_STYLES = [
   { id: "dark",           name: "Dark",           url: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" },
   { id: "light",          name: "Light",          url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" },
@@ -1221,6 +1212,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [buildings3D, setBuildings3D] = useState(null);
   const buildings3DTimerRef = useRef();
 
+  const [sunTimeIdx, setSunTimeIdx] = useState(null); // index into allClusterProfiles.timestamps
+
   const [analysedSensors, setAnalysedSensors] = useState(null);
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
   const [mapSensorData, setMapSensorData] = useState(null);
@@ -1389,6 +1382,35 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
     return map;
   }, [colorByMetric, sensorProperties]);
+
+  // ── Solar lighting ────────────────────────────────────────────────────────────
+  // Seed sunTimeIdx to the midpoint of the loaded time series once data arrives.
+  useEffect(() => {
+    if (allClusterProfiles?.timestamps?.length && sunTimeIdx === null) {
+      setSunTimeIdx(Math.floor(allClusterProfiles.timestamps.length / 2));
+    }
+  }, [allClusterProfiles, sunTimeIdx]);
+
+  // Derive the Unix-ms timestamp for the sun from the loaded time series, or
+  // fall back to a fixed June noon so lighting always looks reasonable.
+  const sunTimestampMs = useMemo(() => {
+    if (sunTimeIdx !== null && allClusterProfiles?.timestamps?.[sunTimeIdx]) {
+      return new Date(allClusterProfiles.timestamps[sunTimeIdx]).getTime();
+    }
+    return Date.UTC(2024, 5, 21, 12); // fallback: midsummer noon
+  }, [sunTimeIdx, allClusterProfiles]);
+
+  // deck.gl's LightingEffect is NOT reactive — create a new one whenever the
+  // timestamp changes.  useMemo ensures we only re-create on actual changes.
+  const lightingEffect = useMemo(() => {
+    const sunLight = new SunLight({
+      timestamp: sunTimestampMs,
+      color: [255, 255, 230],
+      intensity: 2.0,
+      _shadow: true,
+    });
+    return new LightingEffect({ ambientLight: AMBIENT_LIGHT, sunLight });
+  }, [sunTimestampMs]);
 
   // ── deck.gl layers ──
   const layers = useMemo(() => {
@@ -1893,6 +1915,25 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             {MAP_STYLES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </div>
+
+        {/* Sun time scrubber — only shown in 3D mode */}
+        {mode3D && allClusterProfiles?.timestamps?.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <span style={{ fontSize: 10, color: "#E9C46A", whiteSpace: "nowrap", flexShrink: 0 }}>☀ Sun</span>
+            <input
+              type="range"
+              min={0}
+              max={allClusterProfiles.timestamps.length - 1}
+              step={1}
+              value={sunTimeIdx ?? Math.floor(allClusterProfiles.timestamps.length / 2)}
+              onChange={(e) => setSunTimeIdx(Number(e.target.value))}
+              style={{ flex: 1, accentColor: "#E9C46A", cursor: "pointer" }}
+            />
+            <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "monospace" }}>
+              {String(allClusterProfiles.timestamps[sunTimeIdx ?? 0]).slice(0, 16)}
+            </span>
+          </div>
+        )}
 
         {/* Filter panel */}
         {filtersOpen && filterOptions && (
