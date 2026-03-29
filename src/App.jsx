@@ -455,6 +455,7 @@ export default function App() {
                 sensorIdCol={sensorIdCol}
                 clusterGroups={clusterGroups}
                 getEffectiveClusterColor={getEffectiveClusterColor}
+                customClusterCols={customClusterCols}
               />
             )}
             {activeTab === "rf" && (
@@ -1179,7 +1180,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds, colo
 }
 
 // ─── Map View ────────────────────────────────────────────────────
-function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol, clusterGroups = [], getEffectiveClusterColor = getClusterColor }) {
+function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol, clusterGroups = [], getEffectiveClusterColor = getClusterColor, customClusterCols = {} }) {
   const deckContainerRef = useRef();
   const mapRef = useRef();
   const boxOverlayRef = useRef();
@@ -1479,6 +1480,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         },
         sizeScale: 1,
         pickable: true,
+        material: false, // opt out of shadow system — prevents shadow_uShadowMap0 binding error on hover pick pass
         parameters: { depthTest: true },
         updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups, metricColorMap], getScale: [buildingHighlightIds] },
       }));
