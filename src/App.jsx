@@ -4,11 +4,24 @@ import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { SphereGeometry } from "@luma.gl/engine";
-import { WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
+import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
+
+// ── Solar lighting ────────────────────────────────────────────────────────────
+// SunLight uses the viewport's lat/lon to compute sun direction automatically.
+// _shadow: true enables shadow casting on extruded layers (experimental API).
+// Timestamp is hardcoded to June 21 at solar noon UTC for initial setup.
+const ambientLight = new AmbientLight({ color: [255, 255, 255], intensity: 0.4 });
+const sunLight = new SunLight({
+  timestamp: Date.UTC(2024, 5, 21, 12),
+  color: [255, 255, 230],
+  intensity: 2.0,
+  _shadow: true,
+});
+const lightingEffect = new LightingEffect({ ambientLight, sunLight });
 const MAP_STYLES = [
   { id: "dark",           name: "Dark",           url: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" },
   { id: "light",          name: "Light",          url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" },
@@ -1452,7 +1465,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         extruded: true,
         getElevation: (f) => f.properties?.height ?? 10,
         getFillColor: [100, 180, 255, 28],
-        material: { ambient: 0.5, diffuse: 0.3, shininess: 10 },
+        material: { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
       }));
     }
     if (buildingGeometry?.features?.length) {
@@ -1467,7 +1480,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         getLineColor: [88, 166, 255, 200],
         lineWidthMinPixels: 1,
         lineWidthMaxPixels: 2,
-        material: mode3D ? { ambient: 0.6, diffuse: 0.4, shininess: 20 } : undefined,
+        material: mode3D ? { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] } : undefined,
         updateTriggers: { extruded: [mode3D], getFillColor: [mode3D] },
       }));
     }
@@ -1929,6 +1942,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             viewState={viewState}
             controller={!boxZoomActive}
             layers={layers}
+            effects={mode3D ? [lightingEffect] : []}
             onViewStateChange={handleViewStateChange}
             glOptions={{ webgl2: true }}
             getTooltip={({ object }) => {
