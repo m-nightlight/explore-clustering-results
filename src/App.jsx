@@ -7,6 +7,7 @@ import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { getSunInfo } from "./utils/sunPosition";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -1402,6 +1403,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
   // deck.gl's LightingEffect is NOT reactive — create a new one whenever the
   // timestamp changes.  useMemo ensures we only re-create on actual changes.
+  const sunInfo = useMemo(() => getSunInfo(sunTimestampMs), [sunTimestampMs]);
+
   const lightingEffect = useMemo(() => {
     const sunLight = new SunLight({
       timestamp: sunTimestampMs,
@@ -2005,6 +2008,38 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           >
             <Map key={mapStyleId} ref={mapRef} mapStyle={resolveStyle(MAP_STYLES.find(s => s.id === mapStyleId).url)} mapboxAccessToken={MAPBOX_TOKEN} />
           </DeckGL>
+
+          {/* Sun info overlay — 3D mode only */}
+          {mode3D && (
+            <div style={{
+              position: "absolute", bottom: 32, right: 10, zIndex: 5,
+              background: "rgba(26, 30, 40, 0.82)", backdropFilter: "blur(4px)",
+              border: "1px solid #2e3440", borderRadius: 6,
+              padding: "5px 10px", fontFamily: "monospace", fontSize: 11, color: "#c9d1d9",
+              pointerEvents: "none", whiteSpace: "nowrap",
+            }}>
+              {sunInfo.isAboveHorizon ? (
+                <>
+                  <span style={{ color: "#E9C46A" }}>☀</span>
+                  {" "}
+                  <span style={{ color: "#8b949e" }}>
+                    {new Date(sunTimestampMs).toLocaleTimeString("sv-SE", { timeZone: "Europe/Stockholm", hour: "2-digit", minute: "2-digit" })} CEST
+                  </span>
+                  {" | "}Az: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.azimuth)}°</span>
+                  {" | "}El: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.altitude)}°</span>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: "#8b949e" }}>🌙</span>
+                  {" "}
+                  <span style={{ color: "#8b949e" }}>
+                    {new Date(sunTimestampMs).toLocaleTimeString("sv-SE", { timeZone: "Europe/Stockholm", hour: "2-digit", minute: "2-digit" })} CEST
+                  </span>
+                  {" | "}<span style={{ color: "#636e7b" }}>Below horizon</span>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Box zoom overlay */}
           {boxZoomActive && (
