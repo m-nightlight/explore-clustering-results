@@ -1216,6 +1216,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [showGroundPlane, setShowGroundPlane] = useState(false);
   const [groundPlane, setGroundPlane] = useState(null);
   const [showSunArc, setShowSunArc] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playSpeed, setPlaySpeed] = useState(1); // steps per second
+  const playIntervalRef = useRef(null);
   const groundPlaneTimerRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
@@ -1420,6 +1423,21 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       setSunTimeIdx(Math.floor(allClusterProfiles.timestamps.length / 2));
     }
   }, [allClusterProfiles, sunTimeIdx]);
+
+  // Playback: advance sunTimeIdx at playSpeed steps/second; stop at end.
+  useEffect(() => {
+    clearInterval(playIntervalRef.current);
+    if (!isPlaying || !allClusterProfiles?.timestamps?.length) return;
+    const intervalMs = 1000 / playSpeed;
+    playIntervalRef.current = setInterval(() => {
+      setSunTimeIdx((idx) => {
+        const max = allClusterProfiles.timestamps.length - 1;
+        if (idx >= max) { setIsPlaying(false); return max; }
+        return idx + 1;
+      });
+    }, intervalMs);
+    return () => clearInterval(playIntervalRef.current);
+  }, [isPlaying, playSpeed, allClusterProfiles]);
 
   // Derive the Unix-ms timestamp for the sun from the loaded time series, or
   // fall back to a fixed June noon so lighting always looks reasonable.
@@ -1649,7 +1667,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return ls;
   }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showGroundPlane, groundPlane]);
 
-  const handleViewStateChange = useCallback(({ viewState: vs }) => setViewState({ ...vs }), []);
+  const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
+    setViewState({ ...vs });
+    if (interactionState?.isDragging || interactionState?.isPanning || interactionState?.isZooming) {
+      setIsPlaying(false);
+    }
+  }, []);
 
   const toggle3D = () => {
     setMode3D((prev) => {
@@ -2067,17 +2090,43 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           </select>
         </div>
 
-        {/* Sun time scrubber — only shown in 3D mode */}
+        {/* Sun time scrubber + playback controls — only shown in 3D mode */}
         {mode3D && allClusterProfiles?.timestamps?.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <span style={{ fontSize: 10, color: "#E9C46A", whiteSpace: "nowrap", flexShrink: 0 }}>☀ Sun</span>
+            {/* Play / pause */}
+            <button
+              onClick={() => setIsPlaying((v) => !v)}
+              style={{ ...styles.miniBtn, padding: "2px 9px", fontSize: 13, lineHeight: 1, flexShrink: 0,
+                borderColor: isPlaying ? "#E9C46A" : "#3d4555",
+                color:       isPlaying ? "#E9C46A" : "#8b949e",
+                background:  isPlaying ? "#E9C46A22" : "none" }}
+              title={isPlaying ? "Pause" : "Play"}
+            >
+              {isPlaying ? "⏸" : "▶"}
+            </button>
+            {/* Speed selector */}
+            <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+              {[0.5, 1, 2, 5].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setPlaySpeed(s)}
+                  style={{ ...styles.miniBtn, padding: "1px 5px", fontSize: 10, flexShrink: 0,
+                    borderColor: playSpeed === s ? "#E9C46A" : "#3d4555",
+                    color:       playSpeed === s ? "#E9C46A" : "#8b949e",
+                    background:  playSpeed === s ? "#E9C46A22" : "none" }}
+                >
+                  {s}×
+                </button>
+              ))}
+            </div>
             <input
               type="range"
               min={0}
               max={allClusterProfiles.timestamps.length - 1}
               step={1}
               value={sunTimeIdx ?? Math.floor(allClusterProfiles.timestamps.length / 2)}
-              onChange={(e) => setSunTimeIdx(Number(e.target.value))}
+              onChange={(e) => { setIsPlaying(false); setSunTimeIdx(Number(e.target.value)); }}
               style={{ flex: 1, accentColor: "#E9C46A", cursor: "pointer" }}
             />
             <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "monospace" }}>
@@ -2268,14 +2317,36 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 {allClusterProfiles && viewClusterIds.size > 0 && (
                   <>
                     <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
-                    <canvas ref={canvasRef} style={{ ...styles.canvas, height: 200 }} />
+                    <div style={{ position: "relative" }}>
+                      <canvas ref={canvasRef} style={{ ...styles.canvas, height: 200 }} />
+                      {sunTimeIdx !== null && canvasRef.current && (() => {
+                        const n = allClusterProfiles.timestamps.length;
+                        const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (canvasRef.current.clientWidth - 72);
+                        return (
+                          <div style={{ position: "absolute", left: x, top: 16, bottom: 44, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                            <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                          </div>
+                        );
+                      })()}
+                    </div>
                     <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
                       {buildingTimeseries
                         ? `${Object.keys(buildingTimeseries.sensors).length} sensors (building)`
                         : mapSensorData ? `${Object.keys(mapSensorData.sensors).length} sensors` : "Loading…"
                       } + cluster means
                     </p>
-                    <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 200 }} />
+                    <div style={{ position: "relative" }}>
+                      <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 200 }} />
+                      {sunTimeIdx !== null && sensorCanvasRef.current && (() => {
+                        const n = allClusterProfiles.timestamps.length;
+                        const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (sensorCanvasRef.current.clientWidth - 72);
+                        return (
+                          <div style={{ position: "absolute", left: x, top: 16, bottom: 44, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                            <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </>
                 )}
               </>
