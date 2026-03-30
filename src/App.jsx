@@ -1236,7 +1236,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [buildingSearch, setBuildingSearch] = useState("");
   const canvasRef = useRef();
   const sensorCanvasRef = useRef();
-  const irradianceCanvasRef = useRef();
+  const irradianceChartRef = useRef(); // wrapper div for playhead x-position calc
   const floorCanvasRef = useRef();
   const yearCanvasRef = useRef();
   const periodCanvasRef = useRef();
@@ -1966,58 +1966,11 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
   }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor]);
 
-  // ── Irradiance area chart ──
-  useEffect(() => {
-    if (analysisTab !== "profiles") return;
-    if (!allClusterProfiles || !strangData || !irradianceCanvasRef.current) return;
-    const ts = allClusterProfiles.timestamps;
-    if (!ts.length) return;
-
-    // Align STRÅNG values to sensor timestamps
-    const vals = ts.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
-    if (vals.every((v) => v === 0)) return; // no data for this date range
-
-    drawChart(irradianceCanvasRef.current, ts, [0, ...vals, 900], (ctx, xScale, yScale) => {
-      const margin = { top: 16, right: 20, bottom: 44, left: 52 };
-      const baseY = yScale(0);
-
-      // Gradient fill
-      const grad = ctx.createLinearGradient(0, yScale(900), 0, baseY);
-      grad.addColorStop(0, "rgba(240, 185, 40, 0.75)");
-      grad.addColorStop(1, "rgba(240, 120, 20, 0.08)");
-
-      ctx.beginPath();
-      vals.forEach((v, i) => {
-        const x = xScale(i), y = yScale(v);
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.lineTo(xScale(vals.length - 1), baseY);
-      ctx.lineTo(xScale(0), baseY);
-      ctx.closePath();
-      ctx.fillStyle = grad;
-      ctx.fill();
-
-      // Line on top
-      ctx.beginPath();
-      vals.forEach((v, i) => {
-        const x = xScale(i), y = yScale(v);
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.strokeStyle = "#F0B828";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Y-axis label
-      ctx.save();
-      ctx.fillStyle = "#667";
-      ctx.font = "9px monospace";
-      ctx.textAlign = "center";
-      ctx.translate(10, margin.top + (yScale(0) - yScale(900)) / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText("W/m²", 0, 0);
-      ctx.restore();
-    });
-  }, [allClusterProfiles, strangData, analysisTab, drawChart]);
+  // ── Irradiance values aligned to sensor timestamps ──
+  const irradianceVals = useMemo(() => {
+    if (!allClusterProfiles?.timestamps?.length || !strangData) return null;
+    return allClusterProfiles.timestamps.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
+  }, [allClusterProfiles, strangData]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -2498,23 +2451,60 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         );
                       })()}
                     </div>
-                    {strangData && (
-                      <>
-                        <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Solar irradiance — SMHI STRÅNG</p>
-                        <div style={{ position: "relative" }}>
-                          <canvas ref={irradianceCanvasRef} style={{ ...styles.canvas, height: 120 }} />
-                          {sunTimeIdx !== null && irradianceCanvasRef.current && (() => {
-                            const n = allClusterProfiles.timestamps.length;
-                            const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (irradianceCanvasRef.current.clientWidth - 72);
-                            return (
-                              <div style={{ position: "absolute", left: x, top: 16, bottom: 44, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
-                                <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      </>
-                    )}
+                    {irradianceVals && (() => {
+                      const ML = 52, MR = 20, MT = 16, MB = 30;
+                      const VW = 1000, VH = 120;
+                      const pw = VW - ML - MR, ph = VH - MT - MB;
+                      const n = irradianceVals.length;
+                      const MAX = 900;
+                      const sx = (i) => ML + (i / Math.max(1, n - 1)) * pw;
+                      const sy = (v) => MT + ph - Math.min(1, v / MAX) * ph;
+                      const pts = irradianceVals.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
+                      const area = `M ${sx(0).toFixed(1)},${sy(irradianceVals[0]).toFixed(1)} ` +
+                        irradianceVals.map((v, i) => `L ${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ") +
+                        ` L ${sx(n-1).toFixed(1)},${(MT+ph).toFixed(1)} L ${sx(0).toFixed(1)},${(MT+ph).toFixed(1)} Z`;
+                      const ticks = [225, 450, 675];
+                      return (
+                        <>
+                          <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Solar irradiance — SMHI STRÅNG</p>
+                          <div ref={irradianceChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden" }}>
+                            <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
+                              style={{ width: "100%", height: 120, display: "block", background: "#1a1f2e" }}>
+                              <defs>
+                                <linearGradient id="irr-grad" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="0%" stopColor="#F0B828" stopOpacity="0.7" />
+                                  <stop offset="100%" stopColor="#F07820" stopOpacity="0.05" />
+                                </linearGradient>
+                              </defs>
+                              {/* grid lines + y-axis labels */}
+                              {ticks.map((v) => (
+                                <g key={v}>
+                                  <line x1={ML} y1={sy(v)} x2={ML+pw} y2={sy(v)} stroke="#252c3d" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                                  <text x={ML-6} y={sy(v)+3} textAnchor="end" fontSize="14" fill="#667799" fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              {/* area */}
+                              <path d={area} fill="url(#irr-grad)" />
+                              {/* line */}
+                              <polyline points={pts} fill="none" stroke="#F0B828" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+                              {/* W/m² axis label */}
+                              <text x={ML-38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#556" fontFamily="monospace"
+                                transform={`rotate(-90,${ML-38},${MT+ph/2})`}>W/m²</text>
+                            </svg>
+                            {/* playhead */}
+                            {sunTimeIdx !== null && irradianceChartRef.current && (() => {
+                              const cw = irradianceChartRef.current.clientWidth;
+                              const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (cw - 72);
+                              return (
+                                <div style={{ position: "absolute", left: x, top: MT, bottom: MB, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                                  <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </>
+                      );
+                    })()}
                   </>
                 )}
               </>
