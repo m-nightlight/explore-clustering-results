@@ -8,6 +8,7 @@ import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunL
 import Map from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { getSunInfo, getSunPath } from "./utils/sunPosition";
+import { fetchStrangData, getIrradiance, clearSkyEstimate } from "./utils/smhiIrradiance";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -1220,6 +1221,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1); // steps per second
   const playIntervalRef = useRef(null);
+  const [strangData, setStrangData] = useState(null);
   const groundPlaneTimerRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
@@ -1234,6 +1236,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [buildingSearch, setBuildingSearch] = useState("");
   const canvasRef = useRef();
   const sensorCanvasRef = useRef();
+  const irradianceCanvasRef = useRef();
   const floorCanvasRef = useRef();
   const yearCanvasRef = useRef();
   const periodCanvasRef = useRef();
@@ -1440,6 +1443,15 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return () => clearInterval(playIntervalRef.current);
   }, [isPlaying, playSpeed, allClusterProfiles]);
 
+  // Fetch SMHI STRÅNG irradiance for the date range covered by the loaded time series.
+  useEffect(() => {
+    if (!allClusterProfiles?.timestamps?.length) return;
+    const ts = allClusterProfiles.timestamps;
+    const fromDate = new Date(ts[0]).toISOString().slice(0, 10);
+    const toDate   = new Date(ts[ts.length - 1]).toISOString().slice(0, 10);
+    fetchStrangData(fromDate, toDate).then(setStrangData);
+  }, [allClusterProfiles]);
+
   // Derive the Unix-ms timestamp for the sun from the loaded time series, or
   // fall back to a fixed June noon so lighting always looks reasonable.
   const sunTimestampMs = useMemo(() => {
@@ -1452,6 +1464,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   // deck.gl's LightingEffect is NOT reactive — create a new one whenever the
   // timestamp changes.  useMemo ensures we only re-create on actual changes.
   const sunInfo = useMemo(() => getSunInfo(sunTimestampMs), [sunTimestampMs]);
+
+  // W/m² from STRÅNG for the current scrubber position; null when unavailable.
+  const irradiance = useMemo(
+    () => getIrradiance(sunTimestampMs, strangData),
+    [sunTimestampMs, strangData],
+  );
 
   const lightingEffect = useMemo(() => {
     const alt = sunInfo.altitude; // degrees above horizon
@@ -1466,8 +1484,23 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     // below horizon, so there is no brightness bump when the sun sets.
     const ambientIntensity = 0.8 - dayT * 0.4;
 
-    // Sun: zero in deep night, ramps up through dawn to 2.0 at high elevation.
-    const sunIntensity = horizonBlend * (0.8 + dayT * 1.2);
+    // Geometric sun intensity (altitude-based only)
+    const geoSunIntensity = horizonBlend * (0.8 + dayT * 1.2);
+
+    // SMHI STRÅNG modulation: scale sun intensity by measured irradiance.
+    // Peak Gothenburg summer GHI ~850 W/m² → factor 1.0; 0 W/m² → 0.
+    // When data is unavailable, fall back to geometric-only (factor 1).
+    const irradianceFactor = irradiance !== null ? Math.min(1, irradiance / 850) : 1;
+    const sunIntensity = geoSunIntensity * irradianceFactor;
+
+    // Detect overcast: irradiance well below what clear-sky geometry predicts.
+    // Threshold: actual < 30% of estimated clear-sky (and sky is lit enough to matter).
+    const clearSky = clearSkyEstimate(alt);
+    const isOvercast = irradiance !== null && clearSky > 80 && irradiance < clearSky * 0.3;
+
+    // Overcast → raise ambient and tint blue-grey (diffuse skylight feel).
+    const ambientColor = isOvercast ? [200, 215, 240] : [255, 255, 255];
+    const effectiveAmbient = isOvercast ? Math.min(1.0, ambientIntensity * 1.4) : ambientIntensity;
 
     // Colour: cool blue-white night → deep gold at horizon → warm white noon.
     const sunColor = [
@@ -1482,10 +1515,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     // SimpleMeshLayer and SolidPolygonLayer sublayers that can't be suppressed
     // at the application level. Directional shading on building faces still works.
 
-    const ambientLight = new AmbientLight({ color: [255, 255, 255], intensity: ambientIntensity });
+    const ambientLight = new AmbientLight({ color: ambientColor, intensity: effectiveAmbient });
     const sunLight = new SunLight({ timestamp: sunTimestampMs, color: sunColor, intensity: sunIntensity });
     return new LightingEffect({ ambientLight, sunLight });
-  }, [sunInfo, sunTimestampMs]);
+  }, [sunInfo, sunTimestampMs, irradiance]);
 
   // ── Sun arc layers (3D sky dome showing today's sun path) ──
   const sunArcLayers = useMemo(() => {
@@ -1933,6 +1966,59 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     });
   }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor]);
 
+  // ── Irradiance area chart ──
+  useEffect(() => {
+    if (analysisTab !== "profiles") return;
+    if (!allClusterProfiles || !strangData || !irradianceCanvasRef.current) return;
+    const ts = allClusterProfiles.timestamps;
+    if (!ts.length) return;
+
+    // Align STRÅNG values to sensor timestamps
+    const vals = ts.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
+    if (vals.every((v) => v === 0)) return; // no data for this date range
+
+    drawChart(irradianceCanvasRef.current, ts, [0, ...vals, 900], (ctx, xScale, yScale) => {
+      const margin = { top: 16, right: 20, bottom: 44, left: 52 };
+      const baseY = yScale(0);
+
+      // Gradient fill
+      const grad = ctx.createLinearGradient(0, yScale(900), 0, baseY);
+      grad.addColorStop(0, "rgba(240, 185, 40, 0.75)");
+      grad.addColorStop(1, "rgba(240, 120, 20, 0.08)");
+
+      ctx.beginPath();
+      vals.forEach((v, i) => {
+        const x = xScale(i), y = yScale(v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.lineTo(xScale(vals.length - 1), baseY);
+      ctx.lineTo(xScale(0), baseY);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Line on top
+      ctx.beginPath();
+      vals.forEach((v, i) => {
+        const x = xScale(i), y = yScale(v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "#F0B828";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Y-axis label
+      ctx.save();
+      ctx.fillStyle = "#667";
+      ctx.font = "9px monospace";
+      ctx.textAlign = "center";
+      ctx.translate(10, margin.top + (yScale(0) - yScale(900)) / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("W/m²", 0, 0);
+      ctx.restore();
+    });
+  }, [allClusterProfiles, strangData, analysisTab, drawChart]);
+
   // ── Building timeseries fetch ──
   useEffect(() => {
     if (selectedBuildings.size === 0 || !sensorProperties) { setBuildingTimeseries(null); return; }
@@ -2181,8 +2267,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           </div>
         )}
 
-        {/* DeckGL map */}
-        <div ref={deckContainerRef} style={{ height: wideMap ? 700 : 560, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440", position: "relative" }}>
+        {/* DeckGL map + sun intensity bar */}
+        <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+        <div ref={deckContainerRef} style={{ flex: 1, minWidth: 0, height: wideMap ? 700 : 560, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440", position: "relative" }}>
           <DeckGL
             viewState={viewState}
             controller={!boxZoomActive}
@@ -2224,10 +2311,15 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 const fmt = (opts) => d.toLocaleString("en-GB", { timeZone: "Europe/Stockholm", ...opts });
                 const dateTime = fmt({ day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
                 const tz = fmt({ timeZoneName: "short" }).split(" ").at(-1); // "CET" or "CEST"
+                const clearSky = clearSkyEstimate(sunInfo.altitude);
+                const isOvercast = irradiance !== null && clearSky > 80 && irradiance < clearSky * 0.3;
                 return sunInfo.isAboveHorizon ? (
                   <>
                     <span style={{ color: "#E9C46A" }}>☀</span>
                     {" "}<span style={{ color: "#8b949e" }}>{dateTime} {tz}</span>
+                    {irradiance !== null && (
+                      <>{" | "}<span style={{ color: isOvercast ? "#90b8d8" : "#f0c040" }}>{Math.round(irradiance)} W/m²{isOvercast ? " ☁" : ""}</span></>
+                    )}
                     {" | "}Az: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.azimuth)}°</span>
                     {" | "}El: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.altitude)}°</span>
                   </>
@@ -2252,6 +2344,61 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
               )}
             </div>
           )}
+        </div>
+        {/* Sun intensity bar */}
+        {(() => {
+          const mapH = wideMap ? 700 : 560;
+          // Level 0–1: real irradiance / 850 when available, else geometric sin(alt)
+          const level = irradiance !== null
+            ? Math.min(1, irradiance / 850)
+            : Math.max(0, sunInfo.isAboveHorizon ? Math.sin(sunInfo.altitude * (Math.PI / 180)) : 0);
+          const fillPct = `${(level * 100).toFixed(1)}%`;
+          // Always warm amber→yellow; hue 30 (orange) at low, 55 (yellow) at peak
+          const fillColor = `hsl(${30 + level * 25}, 90%, ${30 + level * 35}%)`;
+          // Tick labels: W/m² values when irradiance available, else plain %
+          const ticks = [
+            { t: 0.75, label: irradiance !== null ? "638" : "75%" },
+            { t: 0.5,  label: irradiance !== null ? "425" : "50%" },
+            { t: 0.25, label: irradiance !== null ? "213" : "25%" },
+          ];
+          const unit = irradiance !== null ? "W/m²" : "%";
+          const tooltipVal = irradiance !== null
+            ? `${Math.round(irradiance)} W/m²`
+            : `El ${Math.round(sunInfo.altitude)}° → ${Math.round(level * 100)}%`;
+          return (
+            <div style={{ width: 46, height: mapH, flexShrink: 0, position: "relative" }}
+              title={tooltipVal}>
+              {/* unit label at top */}
+              <div style={{ position: "absolute", top: 2, right: 0, width: 14, fontSize: 7, color: "#4a5568", textAlign: "center", fontFamily: "monospace", lineHeight: 1 }}>
+                {unit}
+              </div>
+              {/* tick labels to the left of the bar */}
+              {ticks.map(({ t, label }) => (
+                <div key={t} style={{
+                  position: "absolute", bottom: `calc(${t * 100}% - 5px)`,
+                  left: 0, width: 28,
+                  fontSize: 8, lineHeight: "10px", color: "#5a6474",
+                  textAlign: "right", fontFamily: "monospace", pointerEvents: "none",
+                }}>
+                  {label}
+                </div>
+              ))}
+              {/* bar */}
+              <div style={{
+                position: "absolute", right: 0, top: 0, bottom: 0, width: 14,
+                borderRadius: 6, border: "1px solid #2e3440", background: "#131820", overflow: "hidden",
+              }}>
+                {ticks.map(({ t }) => (
+                  <div key={t} style={{ position: "absolute", left: 0, right: 0, bottom: `${t * 100}%`, height: 1, background: "#2e3440", zIndex: 1 }} />
+                ))}
+                <div style={{
+                  position: "absolute", bottom: 0, left: 0, right: 0, height: fillPct,
+                  background: fillColor, transition: "height 0.4s ease, background 0.4s ease", zIndex: 2,
+                }} />
+              </div>
+            </div>
+          );
+        })()}
         </div>
       </div>
 
@@ -2351,6 +2498,23 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         );
                       })()}
                     </div>
+                    {strangData && (
+                      <>
+                        <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Solar irradiance — SMHI STRÅNG</p>
+                        <div style={{ position: "relative" }}>
+                          <canvas ref={irradianceCanvasRef} style={{ ...styles.canvas, height: 120 }} />
+                          {sunTimeIdx !== null && irradianceCanvasRef.current && (() => {
+                            const n = allClusterProfiles.timestamps.length;
+                            const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (irradianceCanvasRef.current.clientWidth - 72);
+                            return (
+                              <div style={{ position: "absolute", left: x, top: 16, bottom: 44, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                                <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </>
