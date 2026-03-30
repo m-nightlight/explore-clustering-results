@@ -1448,7 +1448,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (!allClusterProfiles?.timestamps?.length) return;
     const ts = allClusterProfiles.timestamps;
     const fromDate = new Date(ts[0]).toISOString().slice(0, 10);
-    const toDate   = new Date(ts[ts.length - 1]).toISOString().slice(0, 10);
+    // Add one day to toDate: the API returns entries up to toDate T00:00 only,
+    // so the last day's daytime hours would be missing without this.
+    const toDate = new Date(new Date(ts[ts.length - 1]).getTime() + 86400000).toISOString().slice(0, 10);
     fetchStrangData(fromDate, toDate).then(setStrangData);
   }, [allClusterProfiles]);
 
