@@ -28,3 +28,10 @@ CREATE TABLE IF NOT EXISTS temperatures (
 
 CREATE INDEX IF NOT EXISTS idx_temp_sensor ON temperatures (sensor_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_temp_ts     ON temperatures (ts DESC);
+
+CREATE TABLE IF NOT EXISTS custom_cluster_cols (
+    name            TEXT PRIMARY KEY,
+    cluster_mapping JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);

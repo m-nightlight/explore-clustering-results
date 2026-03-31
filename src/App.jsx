@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer, GeoJsonLayer, LineLayer, SolidPolygonLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
@@ -59,13 +59,12 @@ const TABS = [
   { id: "profiles", label: "Cluster Profiles", icon: "◈" },
   { id: "timeseries", label: "Time Series", icon: "◆" },
   { id: "map", label: "Sensor Map", icon: "◉" },
-  { id: "rf", label: "RF Importance", icon: "◊" },
 ];
 
 // ─── Main App ────────────────────────────────────────────────────
 export default function App() {
   const [metadataData, setMetadataData] = useState(null);
-  const [activeTab, setActiveTab] = useState("profiles");
+  const [activeTab, setActiveTab] = useState("map");
   const [selectedK, setSelectedK] = useState(null);
   const [clusterColumns, setClusterColumns] = useState([]);
   const [selectedClusters, setSelectedClusters] = useState(new Set());
@@ -80,22 +79,26 @@ export default function App() {
   // ── Custom CSV cluster columns ──
   const [customClusterCols, setCustomClusterCols] = useState({});
   const csvInputRef = useRef();
+  const [pendingCSV, setPendingCSV] = useState(null); // { mapping, defaultName }
+  const [pendingCSVName, setPendingCSVName] = useState("");
 
-  // Derive cluster columns from metadata
+  // Derive cluster columns from metadata, preserving any custom CSV columns already loaded
   useEffect(() => {
     if (!metadataData || metadataData.length === 0) return;
     const cols = Object.keys(metadataData[0]).filter(
       (c) => c.toLowerCase().includes("cluster") || c.toLowerCase().startsWith("k_") || c.toLowerCase().match(/^k\d+/)
     );
-    if (cols.length === 0) {
-      const potentialClusters = Object.keys(metadataData[0]).filter((c) => {
-        const unique = new Set(metadataData.map((r) => r[c]));
-        return unique.size >= 2 && unique.size <= 50 && c !== "lat" && c !== "lon";
-      });
-      setClusterColumns(potentialClusters);
-    } else {
-      setClusterColumns(cols);
-    }
+    const base = cols.length === 0
+      ? Object.keys(metadataData[0]).filter((c) => {
+          const unique = new Set(metadataData.map((r) => r[c]));
+          return unique.size >= 2 && unique.size <= 50 && c !== "lat" && c !== "lon";
+        })
+      : cols;
+    // Keep any custom CSV columns that are already registered
+    setClusterColumns((prev) => {
+      const customNames = prev.filter((c) => !base.includes(c));
+      return [...base, ...customNames];
+    });
   }, [metadataData]);
 
   useEffect(() => {
@@ -140,17 +143,6 @@ export default function App() {
     ) || Object.keys(metadataData[0])[0];
   }, [metadataData]);
 
-  // Metadata feature columns (non-cluster, non-id, non-location)
-  const featureColumns = useMemo(() => {
-    if (!metadataData || metadataData.length === 0) return [];
-    const exclude = new Set([
-      sensorIdCol, "lat", "lon", "latitude", "longitude", "lng",
-      ...clusterColumns,
-    ].filter(Boolean).map(s => s.toLowerCase()));
-    return Object.keys(metadataData[0]).filter(
-      (c) => !exclude.has(c.toLowerCase())
-    );
-  }, [metadataData, sensorIdCol, clusterColumns]);
 
   const sensorList = useMemo(() => {
     if (!metadataData || !sensorIdCol) return [];
@@ -161,9 +153,24 @@ export default function App() {
     setError(null);
     setLoading(true);
     try {
-      const metadata = await fetchData("/api/metadata");
+      const [metadata, savedCols] = await Promise.all([
+        fetchData("/api/metadata"),
+        fetchData("/api/custom-cluster-cols").catch(() => []),
+      ]);
       if (!metadata.length) throw new Error("No sensor metadata returned");
-      setMetadataData(metadata);
+      // Apply saved custom columns to metadata before setting state
+      let enriched = metadata;
+      for (const { name, mapping } of savedCols) {
+        enriched = enriched.map((r) => ({ ...r, [name]: mapping[r.sensor_id] ?? null }));
+      }
+      setMetadataData(enriched);
+      if (savedCols.length) {
+        setCustomClusterCols(Object.fromEntries(savedCols.map(({ name, mapping }) => [name, mapping])));
+        setClusterColumns((prev) => {
+          const names = savedCols.map((c) => c.name);
+          return [...prev, ...names.filter((n) => !prev.includes(n))];
+        });
+      }
     } catch (e) {
       setError(`Failed to load data: ${e.message}`);
     }
@@ -220,6 +227,9 @@ export default function App() {
     setMetadataData((prev) => prev.map((r) => { const next = { ...r }; delete next[colName]; return next; }));
     setClusterColumns((prev) => prev.filter((c) => c !== colName));
     if (selectedK === colName) setSelectedK(clusterColumns.find((c) => c !== colName) ?? null);
+    // Delete from server
+    fetch(`${API}/api/custom-cluster-cols/${encodeURIComponent(colName)}`, { method: "DELETE" })
+      .catch((e) => console.warn("Failed to delete custom cluster col:", e));
   };
 
   const handleCSVFileChange = (e) => {
@@ -230,16 +240,37 @@ export default function App() {
     reader.onload = (ev) => {
       try {
         const { colName, mapping } = parseClusterCSV(ev.target.result);
-        // If a col with the same name already exists, suffix it
-        const finalName = metadataData && Object.keys(metadataData[0] || {}).includes(colName)
-          ? `${colName}_csv`
-          : colName;
-        addCustomClusterCol(finalName, mapping);
+        // Stage the parsed CSV — user will confirm a name before it's added
+        const defaultName = file.name.replace(/\.csv$/i, "");
+        setPendingCSV({ mapping, colName });
+        setPendingCSVName(defaultName);
       } catch (err) {
         alert(`CSV import failed: ${err.message}`);
       }
     };
     reader.readAsText(file);
+  };
+
+  const confirmPendingCSV = () => {
+    if (!pendingCSV) return;
+    const name = pendingCSVName.trim() || pendingCSV.colName;
+    // Deduplicate if name already exists
+    const existingNames = new Set([
+      ...Object.keys(customClusterCols),
+      ...Object.keys(metadataData?.[0] ?? {}),
+    ]);
+    let finalName = name;
+    let suffix = 2;
+    while (existingNames.has(finalName)) finalName = `${name}_${suffix++}`;
+    addCustomClusterCol(finalName, pendingCSV.mapping);
+    // Persist to server (fire-and-forget — local state is already updated)
+    fetch(`${API}/api/custom-cluster-cols/${encodeURIComponent(finalName)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mapping: pendingCSV.mapping }),
+    }).catch((e) => console.warn("Failed to save custom cluster col:", e));
+    setPendingCSV(null);
+    setPendingCSVName("");
   };
 
   // Map clusterID → group index for fast lookup
@@ -366,6 +397,20 @@ export default function App() {
                 ⊕ CSV
               </button>
               <input ref={csvInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleCSVFileChange} />
+              {pendingCSV && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#1f2a3a", border: "1px solid #457B9D", borderRadius: 6, padding: "3px 6px" }}>
+                  <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap" }}>Name:</span>
+                  <input
+                    autoFocus
+                    value={pendingCSVName}
+                    onChange={(e) => setPendingCSVName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") confirmPendingCSV(); if (e.key === "Escape") { setPendingCSV(null); setPendingCSVName(""); } }}
+                    style={{ width: 120, background: "transparent", border: "none", outline: "none", color: "#c9d1d9", fontSize: 11, fontFamily: "monospace" }}
+                  />
+                  <button onClick={confirmPendingCSV} style={{ ...styles.miniBtn, padding: "2px 8px", fontSize: 10, borderColor: "#457B9D", color: "#457B9D" }}>Add</button>
+                  <button onClick={() => { setPendingCSV(null); setPendingCSVName(""); }} style={{ ...styles.miniBtn, padding: "2px 6px", fontSize: 10 }}>✕</button>
+                </div>
+              )}
               {groupingMode && pendingGroupMembers.size >= 2 && (
                 <button onClick={createGroup} style={{ ...styles.miniBtn, borderColor: "#6BCB77", color: "#6BCB77", background: "#6BCB7722" }}>
                   ✓ Create ({pendingGroupMembers.size})
@@ -459,15 +504,7 @@ export default function App() {
                 customClusterCols={customClusterCols}
               />
             )}
-            {activeTab === "rf" && (
-              <RFImportance
-                metadataData={metadataData}
-                selectedK={selectedK}
-                sensorIdCol={sensorIdCol}
-                featureColumns={featureColumns}
-                clusterColumns={clusterColumns}
-              />
-            )}
+
           </main>
         </>
       )}
@@ -1199,30 +1236,32 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
         { padding: 40 }
       );
-      return { longitude, latitude, zoom: Math.min(zoom, 15), pitch: 0, bearing: 0 };
+      return { longitude, latitude, zoom: Math.min(zoom + 1, 15), pitch: 50, bearing: -15 };
     } catch { return { longitude: 0, latitude: 0, zoom: 4, pitch: 0, bearing: 0 }; }
   });
 
   const [mapStyleId, setMapStyleId] = useState("dark");
   const [boxZoomActive, setBoxZoomActive] = useState(false);
   const [boxRect, setBoxRect] = useState(null);
-  const [mode3D, setMode3D] = useState(false);
-  const [useParquetCoords, setUseParquetCoords] = useState(false);
+  const [mode3D, setMode3D] = useState(true);
+  const [useParquetCoords, setUseParquetCoords] = useState(true);
   const [colorByMetric, setColorByMetric] = useState(null);
   const [pointHeights, setPointHeights] = useState({});
   const [buildings3D, setBuildings3D] = useState(null);
-  const buildings3DTimerRef = useRef();
+
 
   const [sunTimeIdx, setSunTimeIdx] = useState(null); // index into allClusterProfiles.timestamps
-  const [showGroundPlane, setShowGroundPlane] = useState(false);
-  const [groundPlane, setGroundPlane] = useState(null);
   const [showSunArc, setShowSunArc] = useState(false);
+  const [showOutdoorOverlay, setShowOutdoorOverlay] = useState(false);
+  const [xZoom, setXZoom] = useState(null); // { lo, hi } index range, or null = full range
+  const brushRef = useRef(null);
   const [wideMap, setWideMap] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1); // steps per second
   const playIntervalRef = useRef(null);
   const [strangData, setStrangData] = useState(null);
-  const groundPlaneTimerRef = useRef();
+  const [outdoorClimate, setOutdoorClimate] = useState(null); // { year, timestamps, temperature, humidity, global_irradiation }
+  const outdoorChartRef = useRef();
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
@@ -1275,50 +1314,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     fetchData("/api/point-heights").then(setPointHeights).catch(() => {});
   }, []);
 
-  // Auto-fetch all building footprints when in 3D mode (debounced on viewState)
+  // Fetch all building footprints once when entering 3D mode
   useEffect(() => {
-    clearTimeout(buildings3DTimerRef.current);
-    if (!mode3D || viewState.zoom < 13) { setBuildings3D(null); return; }
-    buildings3DTimerRef.current = setTimeout(() => {
-      if (!deckContainerRef.current) return;
-      const { clientWidth: w, clientHeight: h } = deckContainerRef.current;
-      try {
-        const vp = new WebMercatorViewport({ ...viewState, width: w, height: h });
-        const [west, south] = vp.unproject([0, h]);
-        const [east, north] = vp.unproject([w, 0]);
-        fetchData(`/api/buildings-in-bbox?min_lon=${west}&min_lat=${south}&max_lon=${east}&max_lat=${north}`)
-          .then(setBuildings3D)
-          .catch(() => {});
-      } catch {}
-    }, 600);
-    return () => clearTimeout(buildings3DTimerRef.current);
-  }, [mode3D, viewState]);
+    if (!mode3D) { setBuildings3D(null); return; }
+    fetchData("/api/all-buildings").then(setBuildings3D).catch(() => {});
+  }, [mode3D]);
 
-  // Ground plane polygon — covers the viewport so building shadows fall on deck.gl geometry.
-  // The Mapbox basemap is rendered separately and can't receive deck.gl shadows.
-  useEffect(() => {
-    clearTimeout(groundPlaneTimerRef.current);
-    if (!mode3D || !showGroundPlane) { setGroundPlane(null); return; }
-    groundPlaneTimerRef.current = setTimeout(() => {
-      if (!deckContainerRef.current) return;
-      const { clientWidth: w, clientHeight: h } = deckContainerRef.current;
-      try {
-        const vp = new WebMercatorViewport({ ...viewState, width: w, height: h });
-        const [west, south] = vp.unproject([0, h]);
-        const [east, north] = vp.unproject([w, 0]);
-        // Pad 60% beyond viewport edges so the plane edge doesn't pop into view while panning.
-        const dLon = (east - west) * 0.6;
-        const dLat = (north - south) * 0.6;
-        setGroundPlane([[
-          [west - dLon, south - dLat],
-          [east + dLon, south - dLat],
-          [east + dLon, north + dLat],
-          [west - dLon, north + dLat],
-        ]]);
-      } catch {}
-    }, 200);
-    return () => clearTimeout(groundPlaneTimerRef.current);
-  }, [mode3D, showGroundPlane, viewState]);
 
   useEffect(() => {
     const active = Object.entries(activeFilters).filter(([, s]) => s.size > 0);
@@ -1421,10 +1422,17 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   }, [colorByMetric, sensorProperties]);
 
   // ── Solar lighting ────────────────────────────────────────────────────────────
-  // Seed sunTimeIdx to the midpoint of the loaded time series once data arrives.
+  // Seed sunTimeIdx to the first timestamp near 12:00 local time once data arrives.
   useEffect(() => {
     if (allClusterProfiles?.timestamps?.length && sunTimeIdx === null) {
-      setSunTimeIdx(Math.floor(allClusterProfiles.timestamps.length / 2));
+      const ts = allClusterProfiles.timestamps;
+      // Find the index whose local hour is closest to 12
+      const noonIdx = ts.reduce((best, t, i) => {
+        const hour = new Date(t).toLocaleString("sv-SE", { timeZone: "Europe/Stockholm", hour: "2-digit", hour12: false });
+        const diff = Math.abs(Number(hour) - 12);
+        return diff < best.diff ? { i, diff } : best;
+      }, { i: 0, diff: Infinity }).i;
+      setSunTimeIdx(noonIdx);
     }
   }, [allClusterProfiles, sunTimeIdx]);
 
@@ -1454,6 +1462,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     fetchStrangData(fromDate, toDate).then(setStrangData);
   }, [allClusterProfiles]);
 
+  // Fetch outdoor climate (temperature, humidity, station irradiance) for the data year.
+  useEffect(() => {
+    if (!allClusterProfiles?.timestamps?.length) return;
+    const year = new Date(allClusterProfiles.timestamps[0]).getUTCFullYear();
+    if (outdoorClimate?.year === year) return; // already loaded
+    fetchData(`/api/outdoor-climate?year=${year}`)
+      .then(setOutdoorClimate)
+      .catch(() => {});
+  }, [allClusterProfiles, outdoorClimate?.year]);
+
   // Derive the Unix-ms timestamp for the sun from the loaded time series, or
   // fall back to a fixed June noon so lighting always looks reasonable.
   const sunTimestampMs = useMemo(() => {
@@ -1472,6 +1490,30 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     () => getIrradiance(sunTimestampMs, strangData),
     [sunTimestampMs, strangData],
   );
+
+  // Linearly interpolate a named series from outdoorClimate at sunTimestampMs.
+  const interpOutdoor = useCallback((series) => {
+    if (!outdoorClimate?.timestamps?.length) return null;
+    const tms = outdoorClimate.timestamps;
+    const vals = outdoorClimate[series];
+    // Binary search for bracketing indices
+    let lo = 0, hi = tms.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (new Date(tms[mid]).getTime() <= sunTimestampMs) lo = mid; else hi = mid;
+    }
+    const t0 = new Date(tms[lo]).getTime(), t1 = new Date(tms[hi]).getTime();
+    const v0 = vals[lo], v1 = vals[hi];
+    if (v0 == null && v1 == null) return null;
+    if (v0 == null) return v1;
+    if (v1 == null) return v0;
+    if (t1 === t0) return v0;
+    const f = (sunTimestampMs - t0) / (t1 - t0);
+    return v0 + f * (v1 - v0);
+  }, [outdoorClimate, sunTimestampMs]);
+
+  const outdoorTemp = useMemo(() => interpOutdoor("temperature"), [interpOutdoor]);
+  const outdoorRH   = useMemo(() => interpOutdoor("humidity"),    [interpOutdoor]);
 
   const lightingEffect = useMemo(() => {
     const alt = sunInfo.altitude; // degrees above horizon
@@ -1597,17 +1639,6 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   // ── deck.gl layers ──
   const layers = useMemo(() => {
     const ls = [];
-    // Ground plane must be first so buildings render on top of it.
-    if (mode3D && showGroundPlane && groundPlane) {
-      ls.push(new SolidPolygonLayer({
-        id: "ground-plane",
-        data: [groundPlane],
-        getPolygon: d => d,
-        getFillColor: [100, 110, 120, 80],
-        material: { ambient: 0.35, diffuse: 0.6, shininess: 0, specularColor: [0, 0, 0] },
-        extruded: false,
-      }));
-    }
     if (mode3D) {
       ls.push(new LineLayer({
         id: "sensor-struts",
@@ -1701,7 +1732,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showGroundPlane, groundPlane]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -1793,6 +1824,47 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       .catch((e) => console.error("sensors-properties fetch failed:", e));
   };
 
+  // Auto-run analysis once on initial load when sensors + selectedK are ready
+  const autoAnalysedRef = useRef(false);
+  useEffect(() => {
+    if (autoAnalysedRef.current) return;
+    if (visibleSensors.length > 0 && selectedK) {
+      autoAnalysedRef.current = true;
+      analyseView();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleSensors, selectedK]);
+
+  // Shared brush handlers — drag on any chart to zoom the time axis
+  const onChartMouseDown = useCallback((e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    brushRef.current = { startFrac: (e.clientX - rect.left) / rect.width };
+  }, []);
+
+  const onChartMouseUp = useCallback((e) => {
+    if (!brushRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const endFrac = (e.clientX - rect.left) / rect.width;
+    const startFrac = brushRef.current.startFrac;
+    brushRef.current = null;
+    // Ignore tiny drags (clicks)
+    if (Math.abs(endFrac - startFrac) < 0.01) return;
+    const n = allClusterProfiles?.timestamps?.length ?? 1;
+    // Map fraction to index within current zoom range
+    const base = xZoom?.lo ?? 0;
+    const range = xZoom ? (xZoom.hi - xZoom.lo) : (n - 1);
+    // Adjust for left margin (~5.5% of container) and right (~3%)
+    const toIdx = (f) => {
+      const normalized = (f - 0.055) / (0.97 - 0.055);
+      return Math.round(base + Math.max(0, Math.min(1, normalized)) * range);
+    };
+    let lo = toIdx(Math.min(startFrac, endFrac));
+    let hi = toIdx(Math.max(startFrac, endFrac));
+    lo = Math.max(0, lo); hi = Math.min(n - 1, hi);
+    if (hi - lo < 2) return;
+    setXZoom({ lo, hi });
+  }, [allClusterProfiles, xZoom]);
+
   const displaySensors = analysedSensors ?? [];
   const byCluster = useMemo(() => {
     const counts = {};
@@ -1817,16 +1889,20 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   );
 
   // ── Charts ──
-  const drawChart = useCallback((canvas, timestamps, yVals, drawFn) => {
+  const drawChart = useCallback((canvas, timestamps, yVals, drawFn, xZoom = null, opts = {}) => {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
     canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
-    const margin = { top: 16, right: 20, bottom: 44, left: 52 };
+    const { rightMargin = 20 } = opts;
+    const margin = { top: 16, right: rightMargin, bottom: 44, left: 52 };
     const pw = w - margin.left - margin.right, ph = h - margin.top - margin.bottom;
+    const lo = xZoom?.lo ?? 0;
+    const hi = xZoom?.hi ?? (timestamps.length - 1);
     ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
-    const xScale = d3.scaleLinear().domain([0, timestamps.length - 1]).range([margin.left, margin.left + pw]);
+    const xScale = d3.scaleLinear().domain([lo, hi]).range([margin.left, margin.left + pw]);
     const yExtent = d3.extent(yVals);
     const yPad = (yExtent[1] - yExtent[0]) * 0.05 || 1;
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
@@ -1835,9 +1911,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     ctx.fillStyle = "#667"; ctx.font = "10px monospace"; ctx.textAlign = "right";
     yScale.ticks(5).forEach((t) => ctx.fillText(t.toFixed(1), margin.left - 6, yScale(t) + 3));
     ctx.textAlign = "center";
-    const step = Math.max(1, Math.floor(timestamps.length / 6));
-    for (let i = 0; i < timestamps.length; i += step) ctx.fillText(String(timestamps[i]).slice(0, 10), xScale(i), margin.top + ph + 16);
-    drawFn(ctx, xScale, yScale);
+    const step = Math.max(1, Math.floor((hi - lo + 1) / 6));
+    for (let i = lo; i <= hi; i += step) ctx.fillText(String(timestamps[i]).slice(0, 10), xScale(i), margin.top + ph + 16);
+    drawFn(ctx, xScale, yScale, lo, hi, { margin, pw, ph });
   }, []);
 
   // Clusters present in the analysed view
@@ -1918,6 +1994,37 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return { labels, counts };
   }, [activeSensorProperties, selectedK]);
 
+  // ── Irradiance values aligned to sensor timestamps ──
+  const irradianceVals = useMemo(() => {
+    if (!allClusterProfiles?.timestamps?.length || !strangData) return null;
+    return allClusterProfiles.timestamps.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
+  }, [allClusterProfiles, strangData]);
+
+  // ── Outdoor climate values aligned to sensor timestamps ──
+  const outdoorClimateVals = useMemo(() => {
+    if (!allClusterProfiles?.timestamps?.length || !outdoorClimate?.timestamps?.length) return null;
+    const ocTs = outdoorClimate.timestamps.map((t) => new Date(t).getTime());
+    const interp = (series, tsMs) => {
+      const vals = outdoorClimate[series];
+      let lo = 0;
+      for (let i = 0; i < ocTs.length - 1; i++) { if (ocTs[i] <= tsMs) lo = i; else break; }
+      const hi = Math.min(lo + 1, ocTs.length - 1);
+      const v0 = vals[lo], v1 = vals[hi];
+      if (v0 == null && v1 == null) return null;
+      if (v0 == null) return v1;
+      if (v1 == null) return v0;
+      const f = ocTs[hi] === ocTs[lo] ? 0 : (tsMs - ocTs[lo]) / (ocTs[hi] - ocTs[lo]);
+      return v0 + f * (v1 - v0);
+    };
+    return allClusterProfiles.timestamps.map((t) => {
+      const ms = new Date(t).getTime();
+      return {
+        temp: interp("temperature", ms),
+        rh:   interp("humidity", ms),
+      };
+    });
+  }, [allClusterProfiles, outdoorClimate]);
+
   useEffect(() => {
     if (analysisTab !== "profiles") return;
     if (!allClusterProfiles || !analysedSensors || !canvasRef.current) return;
@@ -1925,18 +2032,33 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     const viewProfiles = Object.fromEntries(
       Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
     );
-    const yVals = Object.values(viewProfiles).flatMap((p) => p.values).filter((v) => v != null);
+    const outdoorTemps = (showOutdoorOverlay && outdoorClimateVals)
+      ? outdoorClimateVals.map((d) => d.temp).filter((v) => v != null)
+      : [];
+    const yVals = [...Object.values(viewProfiles).flatMap((p) => p.values), ...outdoorTemps].filter((v) => v != null);
     if (!yVals.length) return;
-    drawChart(canvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
+    drawChart(canvasRef.current, ts, yVals, (ctx, xScale, yScale, lo, hi) => {
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
         ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
         let started = false;
-        p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+        for (let i = lo; i <= hi; i++) {
+          const v = p.values[i]; if (v === null) { started = false; continue; }
+          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
+        }
         ctx.stroke();
       });
-    });
-  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor]);
+      if (showOutdoorOverlay && outdoorClimateVals) {
+        ctx.strokeStyle = "#ff8a65"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 3]); ctx.beginPath();
+        let started = false;
+        for (let i = lo; i <= hi; i++) {
+          const v = outdoorClimateVals[i]?.temp; if (v == null) { started = false; continue; }
+          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
+        }
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+    }, xZoom);
+  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor, xZoom, showOutdoorOverlay, outdoorClimateVals]);
 
   useEffect(() => {
     if (analysisTab !== "profiles") return;
@@ -1948,31 +2070,31 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     );
     const yVals = [...Object.values(viewProfiles).flatMap((p) => p.values), ...Object.values(activeSensorData.sensors).flat()].filter((v) => v != null && !isNaN(v));
     if (!yVals.length) return;
-    drawChart(sensorCanvasRef.current, ts, yVals, (ctx, xScale, yScale) => {
+    drawChart(sensorCanvasRef.current, ts, yVals, (ctx, xScale, yScale, lo, hi) => {
       Object.entries(activeSensorData.sensors).forEach(([sid, vals]) => {
         const sensor = analysedSensors?.find((d) => d.id === sid);
         const ci = sensor ? clusters.indexOf(sensor.cluster) : -1;
         const baseColor = sensor ? getEffectiveClusterColor(sensor.cluster, ci) : "#888";
         ctx.strokeStyle = baseColor + "40"; ctx.lineWidth = 1; ctx.beginPath();
         let started = false;
-        vals.forEach((v, i) => { if (v == null || isNaN(v)) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+        for (let i = lo; i <= hi; i++) {
+          const v = vals[i]; if (v == null || isNaN(v)) { started = false; continue; }
+          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
+        }
         ctx.stroke();
       });
       Object.entries(viewProfiles).forEach(([cidStr, p]) => {
         const ci = clusters.indexOf(Number(cidStr));
         ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
         let started = false;
-        p.values.forEach((v, i) => { if (v === null) return; if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v)); });
+        for (let i = lo; i <= hi; i++) {
+          const v = p.values[i]; if (v === null) { started = false; continue; }
+          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
+        }
         ctx.stroke();
       });
-    });
-  }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor]);
-
-  // ── Irradiance values aligned to sensor timestamps ──
-  const irradianceVals = useMemo(() => {
-    if (!allClusterProfiles?.timestamps?.length || !strangData) return null;
-    return allClusterProfiles.timestamps.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
-  }, [allClusterProfiles, strangData]);
+    }, xZoom);
+  }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor, xZoom]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -2107,14 +2229,19 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           <button onClick={analyseView} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#457B9D", color: "#457B9D" }}>
             Analyse view
           </button>
+          {analysedSensors && outdoorClimateVals && (
+            <button onClick={() => setShowOutdoorOverlay(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorOverlay ? "#ff8a65" : "#3d4555", color: showOutdoorOverlay ? "#ff8a65" : "#8b949e", background: showOutdoorOverlay ? "#ff8a6522" : "none" }}>
+              🌡 Outdoor temp
+            </button>
+          )}
+          {xZoom && (
+            <button onClick={() => setXZoom(null)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#E9C46A", color: "#E9C46A", background: "#E9C46A22" }}>
+              ✕ Reset zoom
+            </button>
+          )}
           <button onClick={toggle3D} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: mode3D ? "#E9C46A" : "#3d4555", color: mode3D ? "#E9C46A" : "#8b949e", background: mode3D ? "#E9C46A22" : "none" }}>
             ⬡ 3D{Object.keys(pointHeights).length === 0 ? " (loading…)" : ""}
           </button>
-          {mode3D && (
-            <button onClick={() => setShowGroundPlane(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showGroundPlane ? "#E9C46A" : "#3d4555", color: showGroundPlane ? "#E9C46A" : "#8b949e", background: showGroundPlane ? "#E9C46A22" : "none" }}>
-              ⬜ Ground
-            </button>
-          )}
           {mode3D && (
             <button onClick={() => setShowSunArc(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showSunArc ? "#E9C46A" : "#3d4555", color: showSunArc ? "#E9C46A" : "#8b949e", background: showSunArc ? "#E9C46A22" : "none" }}>
               ☀ Sun arc
@@ -2277,12 +2404,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                     )}
                     {" | "}Az: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.azimuth)}°</span>
                     {" | "}El: <span style={{ color: "#e0e0e0" }}>{Math.round(sunInfo.altitude)}°</span>
+                    {outdoorTemp !== null && <>{" | "}<span style={{ color: "#ff8a65" }}>{outdoorTemp.toFixed(1)}°C</span></>}
+                    {outdoorRH   !== null && <>{" "}<span style={{ color: "#4fc3f7" }}>{Math.round(outdoorRH)}% RH</span></>}
                   </>
                 ) : (
                   <>
                     <span style={{ color: "#8b949e" }}>🌙</span>
                     {" "}<span style={{ color: "#8b949e" }}>{dateTime} {tz}</span>
                     {" | "}<span style={{ color: "#636e7b" }}>Below horizon</span>
+                    {outdoorTemp !== null && <>{" | "}<span style={{ color: "#ff8a65" }}>{outdoorTemp.toFixed(1)}°C</span></>}
+                    {outdoorRH   !== null && <>{" "}<span style={{ color: "#4fc3f7" }}>{Math.round(outdoorRH)}% RH</span></>}
                   </>
                 );
               })()}
@@ -2424,7 +2555,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                   <>
                     <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
                     <div style={{ position: "relative" }}>
-                      <canvas ref={canvasRef} style={{ ...styles.canvas, height: 200 }} />
+                      <canvas ref={canvasRef} style={{ ...styles.canvas, height: showOutdoorOverlay ? 240 : 200 }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp} />
                       {sunTimeIdx !== null && canvasRef.current && (() => {
                         const n = allClusterProfiles.timestamps.length;
                         const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (canvasRef.current.clientWidth - 72);
@@ -2442,7 +2573,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                       } + cluster means
                     </p>
                     <div style={{ position: "relative" }}>
-                      <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: 200 }} />
+                      <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: showOutdoorOverlay ? 240 : 200 }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp} />
                       {sunTimeIdx !== null && sensorCanvasRef.current && (() => {
                         const n = allClusterProfiles.timestamps.length;
                         const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (sensorCanvasRef.current.clientWidth - 72);
@@ -2453,23 +2584,117 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         );
                       })()}
                     </div>
+                    {outdoorClimateVals && (() => {
+                      const ML = 52, MR = 52, MT = 16, MB = 30;
+                      const VW = 1000, VH = 120;
+                      const pw = VW - ML - MR, ph = VH - MT - MB;
+                      const n = outdoorClimateVals.length;
+                      const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
+                      const sliced = outdoorClimateVals.slice(lo, hi + 1);
+                      const visN = sliced.length;
+                      const sx = (i) => ML + (i / Math.max(1, visN - 1)) * pw;
+                      // Temperature axis: auto-range with padding
+                      const temps = sliced.map((d) => d.temp).filter((v) => v != null);
+                      const rhs   = sliced.map((d) => d.rh).filter((v) => v != null);
+                      const tMin = Math.floor(Math.min(...(temps.length ? temps : [0])) - 2), tMax = Math.ceil(Math.max(...(temps.length ? temps : [1])) + 2);
+                      const syT = (v) => v == null ? null : MT + ph - ((v - tMin) / (tMax - tMin)) * ph;
+                      // RH axis: 0–100%
+                      const syRH = (v) => v == null ? null : MT + ph - (v / 100) * ph;
+                      // Build polyline points, skipping nulls (split into segments)
+                      const buildPath = (fn, data) => {
+                        let d = ""; let inSeg = false;
+                        data.forEach((item, i) => {
+                          const y = fn(item); if (y == null) { inSeg = false; return; }
+                          d += inSeg ? ` L ${sx(i).toFixed(1)},${y.toFixed(1)}` : ` M ${sx(i).toFixed(1)},${y.toFixed(1)}`;
+                          inSeg = true;
+                        });
+                        return d.trim();
+                      };
+                      const tempPath = buildPath((d) => syT(d.temp), sliced);
+                      const rhPath   = buildPath((d) => syRH(d.rh),  sliced);
+                      const tTicks = [tMin, Math.round((tMin+tMax)/2), tMax];
+                      const rhTicks = [25, 50, 75];
+                      return (
+                        <>
+                          <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Outdoor temperature &amp; relative humidity — SMHI station</p>
+                          <div ref={outdoorChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp}>
+                            <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
+                              style={{ width: "100%", height: 120, display: "block", background: "#1a1f2e" }}>
+                              {/* RH area (background) */}
+                              {rhs.length > 0 && (() => {
+                                const area = `M ${sx(0).toFixed(1)},${syRH(sliced[0].rh ?? 0).toFixed(1)} ` +
+                                  sliced.map((d, i) => `L ${sx(i).toFixed(1)},${syRH(d.rh ?? 0).toFixed(1)}`).join(" ") +
+                                  ` L ${sx(visN-1).toFixed(1)},${(MT+ph).toFixed(1)} L ${sx(0).toFixed(1)},${(MT+ph).toFixed(1)} Z`;
+                                return (
+                                  <>
+                                    <defs>
+                                      <linearGradient id="rh-grad" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="0%" stopColor="#4fc3f7" stopOpacity="0.25" />
+                                        <stop offset="100%" stopColor="#4fc3f7" stopOpacity="0.03" />
+                                      </linearGradient>
+                                    </defs>
+                                    <path d={area} fill="url(#rh-grad)" />
+                                  </>
+                                );
+                              })()}
+                              {/* RH grid lines (right axis) */}
+                              {rhTicks.map((v) => (
+                                <g key={`rh${v}`}>
+                                  <line x1={ML} y1={syRH(v)} x2={ML+pw} y2={syRH(v)} stroke="#1e2535" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+                                  <text x={VW - MR + 6} y={syRH(v)+4} textAnchor="start" fontSize="14" fill="#4fc3f799" fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              {/* RH line */}
+                              {rhs.length > 0 && <path d={rhPath} fill="none" stroke="#4fc3f7" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeOpacity="0.6" />}
+                              {/* Temperature grid lines + labels (left axis) */}
+                              {tTicks.map((v) => (
+                                <g key={`t${v}`}>
+                                  <line x1={ML} y1={syT(v)} x2={ML+pw} y2={syT(v)} stroke="#252c3d" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+                                  <text x={ML-6} y={syT(v)+4} textAnchor="end" fontSize="14" fill="#ff8a6599" fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              {/* Temperature line */}
+                              {temps.length > 0 && <path d={tempPath} fill="none" stroke="#ff8a65" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />}
+                              {/* Axis labels */}
+                              <text x={ML-38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#ff8a6566" fontFamily="monospace"
+                                transform={`rotate(-90,${ML-38},${MT+ph/2})`}>°C</text>
+                              <text x={VW-MR+38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#4fc3f766" fontFamily="monospace"
+                                transform={`rotate(90,${VW-MR+38},${MT+ph/2})`}>RH%</text>
+                            </svg>
+                            {/* playhead */}
+                            {sunTimeIdx !== null && outdoorChartRef.current && sunTimeIdx >= lo && sunTimeIdx <= hi && (() => {
+                              const cw = outdoorChartRef.current.clientWidth;
+                              const x = ML + ((sunTimeIdx - lo) / Math.max(1, hi - lo)) * (cw - ML - MR / VW * cw);
+                              return (
+                                <div style={{ position: "absolute", left: x, top: MT, bottom: MB, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                                  <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </>
+                      );
+                    })()}
                     {irradianceVals && (() => {
                       const ML = 52, MR = 20, MT = 16, MB = 30;
                       const VW = 1000, VH = 120;
                       const pw = VW - ML - MR, ph = VH - MT - MB;
                       const n = irradianceVals.length;
+                      const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
+                      const sliced = irradianceVals.slice(lo, hi + 1);
+                      const visN = sliced.length;
                       const MAX = 900;
-                      const sx = (i) => ML + (i / Math.max(1, n - 1)) * pw;
+                      const sx = (i) => ML + (i / Math.max(1, visN - 1)) * pw;
                       const sy = (v) => MT + ph - Math.min(1, v / MAX) * ph;
-                      const pts = irradianceVals.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
-                      const area = `M ${sx(0).toFixed(1)},${sy(irradianceVals[0]).toFixed(1)} ` +
-                        irradianceVals.map((v, i) => `L ${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ") +
-                        ` L ${sx(n-1).toFixed(1)},${(MT+ph).toFixed(1)} L ${sx(0).toFixed(1)},${(MT+ph).toFixed(1)} Z`;
+                      const pts = sliced.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
+                      const area = `M ${sx(0).toFixed(1)},${sy(sliced[0]).toFixed(1)} ` +
+                        sliced.map((v, i) => `L ${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ") +
+                        ` L ${sx(visN-1).toFixed(1)},${(MT+ph).toFixed(1)} L ${sx(0).toFixed(1)},${(MT+ph).toFixed(1)} Z`;
                       const ticks = [225, 450, 675];
                       return (
                         <>
                           <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Solar irradiance — SMHI STRÅNG</p>
-                          <div ref={irradianceChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden" }}>
+                          <div ref={irradianceChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp}>
                             <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
                               style={{ width: "100%", height: 120, display: "block", background: "#1a1f2e" }}>
                               <defs>
@@ -2494,9 +2719,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                                 transform={`rotate(-90,${ML-38},${MT+ph/2})`}>W/m²</text>
                             </svg>
                             {/* playhead */}
-                            {sunTimeIdx !== null && irradianceChartRef.current && (() => {
+                            {sunTimeIdx !== null && irradianceChartRef.current && sunTimeIdx >= lo && sunTimeIdx <= hi && (() => {
                               const cw = irradianceChartRef.current.clientWidth;
-                              const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (cw - 72);
+                              const x = ML + ((sunTimeIdx - lo) / Math.max(1, hi - lo)) * (cw - ML - MR / VW * cw);
                               return (
                                 <div style={{ position: "absolute", left: x, top: MT, bottom: MB, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
                                   <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
@@ -2685,203 +2910,6 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     </div>
   );
 }
-
-// ─── RF Feature Importance ───────────────────────────────────────
-function RFImportance({ metadataData, selectedK, sensorIdCol, featureColumns, clusterColumns }) {
-  const [rfResult, setRfResult] = useState(null);
-  const [rfLoading, setRfLoading] = useState(false);
-  const [selectedFeatures, setSelectedFeatures] = useState(new Set());
-  const [nEstimators, setNEstimators] = useState(100);
-
-  useEffect(() => {
-    if (featureColumns.length > 0 && selectedFeatures.size === 0) {
-      setSelectedFeatures(new Set(featureColumns));
-    }
-  }, [featureColumns]);
-
-  const toggleFeature = (f) => {
-    setSelectedFeatures((prev) => {
-      const next = new Set(prev);
-      if (next.has(f)) next.delete(f);
-      else next.add(f);
-      return next;
-    });
-  };
-
-  const runRF = useCallback(async () => {
-    if (!metadataData || selectedFeatures.size === 0) return;
-    setRfLoading(true);
-
-    // Simple RF using the Anthropic API to compute feature importance
-    // We'll do a client-side Gini importance approximation using decision stumps
-    // For a proper RF, the user should use Python — here we compute a JS-based proxy
-
-    try {
-      const features = [...selectedFeatures];
-      const rows = metadataData.filter((r) => r[selectedK] != null);
-      const labels = rows.map((r) => r[selectedK]);
-      const uniqueLabels = [...new Set(labels)];
-
-      // Encode categorical features
-      const encodedData = rows.map((r) => {
-        const encoded = {};
-        features.forEach((f) => {
-          const val = r[f];
-          if (typeof val === "number" && !isNaN(val)) {
-            encoded[f] = val;
-          } else {
-            encoded[f] = String(val);
-          }
-        });
-        return encoded;
-      });
-
-      // Compute mutual information / association for each feature
-      const importances = features.map((f) => {
-        const values = encodedData.map((r) => r[f]);
-        const isNumeric = typeof values[0] === "number";
-
-        if (isNumeric) {
-          // For numeric: compute variance reduction (like a decision tree split)
-          const sorted = values.map((v, i) => ({ v, label: labels[i] })).sort((a, b) => a.v - b.v);
-          let bestGain = 0;
-          const totalEntropy = computeEntropy(labels, uniqueLabels);
-
-          const step = Math.max(1, Math.floor(sorted.length / 20));
-          for (let i = step; i < sorted.length - step; i += step) {
-            const leftLabels = sorted.slice(0, i).map((s) => s.label);
-            const rightLabels = sorted.slice(i).map((s) => s.label);
-            const leftEntropy = computeEntropy(leftLabels, uniqueLabels);
-            const rightEntropy = computeEntropy(rightLabels, uniqueLabels);
-            const weightedEntropy = (leftLabels.length * leftEntropy + rightLabels.length * rightEntropy) / sorted.length;
-            const gain = totalEntropy - weightedEntropy;
-            if (gain > bestGain) bestGain = gain;
-          }
-          return { feature: f, importance: bestGain, type: "numeric" };
-        } else {
-          // Categorical: compute information gain
-          const totalEntropy = computeEntropy(labels, uniqueLabels);
-          const groups = {};
-          values.forEach((v, i) => {
-            if (!groups[v]) groups[v] = [];
-            groups[v].push(labels[i]);
-          });
-          let weightedEntropy = 0;
-          Object.values(groups).forEach((g) => {
-            weightedEntropy += (g.length / values.length) * computeEntropy(g, uniqueLabels);
-          });
-          return { feature: f, importance: totalEntropy - weightedEntropy, type: "categorical" };
-        }
-      });
-
-      importances.sort((a, b) => b.importance - a.importance);
-
-      // Normalize
-      const maxImp = importances[0]?.importance || 1;
-      importances.forEach((imp) => (imp.normalized = imp.importance / maxImp));
-
-      // Compute balanced accuracy proxy
-      const totalEntropy = computeEntropy(labels, uniqueLabels);
-      const avgGain = d3.mean(importances.map((imp) => imp.importance));
-
-      setRfResult({
-        importances,
-        nSamples: rows.length,
-        nFeatures: features.length,
-        nClusters: uniqueLabels.length,
-        baselineEntropy: totalEntropy,
-      });
-    } catch (e) {
-      console.error(e);
-    }
-    setRfLoading(false);
-  }, [metadataData, selectedK, selectedFeatures, sensorIdCol, nEstimators]);
-
-  if (!metadataData) {
-    return (
-      <div style={styles.emptyState}>
-        <p style={styles.emptyIcon}>◊</p>
-        <p>Upload metadata to analyse feature importance</p>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <div style={styles.rfConfig}>
-        <div style={styles.rfConfigSection}>
-          <h3 style={styles.rfTitle}>Select Features</h3>
-          <div style={styles.featureGrid}>
-            {featureColumns.map((f) => (
-              <label key={f} style={styles.featureLabel}>
-                <input
-                  type="checkbox"
-                  checked={selectedFeatures.has(f)}
-                  onChange={() => toggleFeature(f)}
-                  style={styles.checkbox}
-                />
-                {f}
-              </label>
-            ))}
-          </div>
-        </div>
-        <button
-          onClick={runRF}
-          disabled={rfLoading || selectedFeatures.size === 0}
-          style={{
-            ...styles.runBtn,
-            opacity: rfLoading || selectedFeatures.size === 0 ? 0.5 : 1,
-          }}
-        >
-          {rfLoading ? "Computing..." : "Compute Feature Importance"}
-        </button>
-        <p style={styles.rfNote}>
-          Uses information gain to estimate feature-cluster association. For full Random Forest with cross-validation, use the Python code from earlier.
-        </p>
-      </div>
-
-      {rfResult && (
-        <div style={styles.rfResults}>
-          <div style={styles.rfStats}>
-            <span>Samples: {rfResult.nSamples.toLocaleString()}</span>
-            <span>Features: {rfResult.nFeatures}</span>
-            <span>Clusters: {rfResult.nClusters}</span>
-          </div>
-          <div style={styles.rfBars}>
-            {rfResult.importances.map((imp, i) => (
-              <div key={imp.feature} style={styles.rfBarRow}>
-                <span style={styles.rfBarLabel}>{imp.feature}</span>
-                <div style={styles.rfBarTrack}>
-                  <div
-                    style={{
-                      ...styles.rfBarFill,
-                      width: `${imp.normalized * 100}%`,
-                      backgroundColor: getClusterColor(i),
-                    }}
-                  />
-                </div>
-                <span style={styles.rfBarValue}>{imp.importance.toFixed(4)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────
-function computeEntropy(labels, uniqueLabels) {
-  const counts = {};
-  labels.forEach((l) => (counts[l] = (counts[l] || 0) + 1));
-  let entropy = 0;
-  uniqueLabels.forEach((l) => {
-    const p = (counts[l] || 0) / labels.length;
-    if (p > 0) entropy -= p * Math.log2(p);
-  });
-  return entropy;
-}
-
 // ─── Styles ──────────────────────────────────────────────────────
 const styles = {
   container: {

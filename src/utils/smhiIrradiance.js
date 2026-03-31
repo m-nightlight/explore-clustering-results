@@ -74,23 +74,27 @@ export function getIrradiance(timestampMs, data) {
   if (!data?.length) return null;
 
   // STRÅNG date_time strings are already ISO 8601 UTC ("2019-07-26T12:00:00Z")
-  // — parse directly; do NOT append Z (would produce "...ZZ" → NaN).
-  let closest = null;
-  let minDiff = Infinity;
+  // Find the two bracketing entries and linearly interpolate between them.
+  let before = null; // last entry at or before timestampMs
+  let after = null;  // first entry after timestampMs
 
   for (const entry of data) {
     const entryMs = new Date(entry.date_time).getTime();
-    const diff = Math.abs(entryMs - timestampMs);
-    if (diff < minDiff) {
-      minDiff = diff;
-      closest = entry.value;
+    if (entryMs <= timestampMs) {
+      before = { ms: entryMs, value: entry.value };
+    } else {
+      after = { ms: entryMs, value: entry.value };
+      break; // data is sorted; first entry past target is our upper bracket
     }
-    // Data is sorted chronologically; once diff grows again we can stop
-    if (entryMs > timestampMs + 5400000) break; // 90 min past target
   }
 
-  // Only return if within ±90 minutes of a known entry
-  return minDiff <= 5400000 ? closest : null;
+  if (!before && !after) return null;
+  if (!before) return after.ms - timestampMs <= 5400000 ? after.value : null;
+  if (!after)  return timestampMs - before.ms <= 5400000 ? before.value : null;
+
+  // Both brackets found — interpolate
+  const t = (timestampMs - before.ms) / (after.ms - before.ms);
+  return before.value + t * (after.value - before.value);
 }
 
 /**

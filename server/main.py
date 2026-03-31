@@ -19,6 +19,10 @@ BUILDING_CLUSTERS_PARQUET = os.environ.get(
     "BUILDING_CLUSTERS_PARQUET",
     os.path.join(os.path.dirname(__file__), "..", "data", "meta_clusters_combined_building_level.parquet"),
 )
+SMHI_MEASUREMENTS_DIR = os.environ.get(
+    "SMHI_MEASUREMENTS_DIR",
+    "/Users/matsp/phd-python-projects/SMHI-Climate-data-collector/data_cities/göteborg/measurements",
+)
 
 def _parse_dsn_for_asyncpg(url: str):
     """Strip params asyncpg doesn't understand (e.g. gssencmode) from the DSN."""
@@ -72,6 +76,54 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: could not load building clusters from parquet: {e}")
         app.state.building_cluster_map = {}
+    # Preload all building footprints (all sensors with building_geom, no limit)
+    try:
+        async with app.state.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (properties->>'lm_building_id')
+                    properties->>'lm_building_id'          AS lm_building_id,
+                    ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom,
+                    MAX((properties->>'max_floor')::numeric)
+                        OVER (PARTITION BY properties->>'lm_building_id') AS max_floor
+                FROM sensors
+                WHERE building_geom IS NOT NULL
+                ORDER BY properties->>'lm_building_id'
+                """
+            )
+        osm_heights = app.state.building_osm_heights
+        features = []
+        for r in rows:
+            if not r["geom"]:
+                continue
+            bid = r["lm_building_id"]
+            height = (
+                osm_heights.get(bid)
+                or (float(r["max_floor"]) * 3.2 if r["max_floor"] else 10.0)
+            )
+            features.append({
+                "type": "Feature",
+                "geometry": json.loads(r["geom"]),
+                "properties": {"lm_building_id": bid, "height": height},
+            })
+        app.state.all_buildings = {"type": "FeatureCollection", "features": features}
+        print(f"Preloaded {len(features)} building footprints")
+    except Exception as e:
+        print(f"Warning: could not preload buildings: {e}")
+        app.state.all_buildings = {"type": "FeatureCollection", "features": []}
+    # Ensure custom_cluster_cols table exists and load saved columns
+    async with app.state.pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS custom_cluster_cols (
+                name            TEXT PRIMARY KEY,
+                cluster_mapping JSONB NOT NULL DEFAULT '{}',
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        rows = await conn.fetch("SELECT name, cluster_mapping FROM custom_cluster_cols ORDER BY created_at")
+        app.state.custom_cluster_cols = {r["name"]: r["cluster_mapping"] for r in rows}
+        print(f"Loaded {len(app.state.custom_cluster_cols)} custom cluster column(s)")
     yield
     await app.state.pool.close()
 
@@ -703,46 +755,91 @@ async def get_point_heights(request: Request):
     return request.app.state.point_heights
 
 
-@app.get("/api/buildings-in-bbox")
-async def get_buildings_in_bbox(
-    request: Request,
-    min_lon: float = Query(...),
-    min_lat: float = Query(...),
-    max_lon: float = Query(...),
-    max_lat: float = Query(...),
-):
-    """Return extruded building footprints (GeoJSON) for all buildings whose sensors
-    fall within the given bbox. Heights prefer osm_height from parquet, fall back to
-    max_floor * 3.2. Limited to 400 buildings."""
+@app.get("/api/all-buildings")
+async def get_all_buildings(request: Request):
+    """Return all preloaded building footprints (GeoJSON FeatureCollection)."""
+    return request.app.state.all_buildings
+
+
+@app.get("/api/outdoor-climate")
+async def get_outdoor_climate(year: int = Query(...)):
+    """Return hourly outdoor climate data for Gothenburg for the given year.
+
+    Reads from SMHI_MEASUREMENTS_DIR/year_{year}.parquet.
+    Returns timestamps (ISO UTC strings) plus temperature (°C), humidity (%),
+    and global_irradiation (W/m²). Missing values are returned as null.
+    """
+    import math
+    parquet_path = os.path.join(SMHI_MEASUREMENTS_DIR, f"year_{year}.parquet")
+    if not os.path.exists(parquet_path):
+        raise HTTPException(404, f"No climate data for year {year}")
+    try:
+        df = pd.read_parquet(
+            parquet_path,
+            columns=["timestamp", "temperature", "humidity", "global_irradiation"],
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read climate data: {e}")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.sort_values("timestamp")
+
+    def _clean(v):
+        return None if (v is None or (isinstance(v, float) and math.isnan(v))) else v
+
+    return {
+        "year": year,
+        "timestamps": df["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist(),
+        "temperature": [_clean(v) for v in df["temperature"].tolist()],
+        "humidity":    [_clean(v) for v in df["humidity"].tolist()],
+        "global_irradiation": [_clean(v) for v in df["global_irradiation"].tolist()],
+    }
+
+
+# ── Custom cluster columns (persisted) ───────────────────────────────────────
+
+@app.get("/api/custom-cluster-cols")
+async def list_custom_cluster_cols(request: Request):
+    """Return all saved custom cluster column names and their sensor→cluster mappings."""
+    return [
+        {"name": name, "mapping": mapping}
+        for name, mapping in request.app.state.custom_cluster_cols.items()
+    ]
+
+
+@app.put("/api/custom-cluster-cols/{name}")
+async def upsert_custom_cluster_col(name: str, request: Request):
+    """Save (insert or replace) a named custom cluster column mapping."""
+    body = await request.json()
+    mapping = body.get("mapping")
+    if not isinstance(mapping, dict):
+        raise HTTPException(400, "Body must be {\"mapping\": {sensor_id: cluster_int}}")
+    # Validate: values must be integers
+    try:
+        clean = {str(k): int(v) for k, v in mapping.items()}
+    except (TypeError, ValueError):
+        raise HTTPException(400, "All mapping values must be integers")
     async with request.app.state.pool.acquire() as conn:
-        rows = await conn.fetch(
+        await conn.execute(
             """
-            SELECT DISTINCT ON (properties->>'lm_building_id')
-                properties->>'lm_building_id'          AS lm_building_id,
-                ST_AsGeoJSON(ST_Transform(building_geom, 4326)) AS geom,
-                MAX((properties->>'max_floor')::numeric)
-                    OVER (PARTITION BY properties->>'lm_building_id') AS max_floor
-            FROM sensors
-            WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
-              AND building_geom IS NOT NULL
-            ORDER BY properties->>'lm_building_id'
-            LIMIT 400
+            INSERT INTO custom_cluster_cols (name, cluster_mapping, updated_at)
+            VALUES ($1, $2::jsonb, NOW())
+            ON CONFLICT (name) DO UPDATE
+              SET cluster_mapping = EXCLUDED.cluster_mapping,
+                  updated_at = NOW()
             """,
-            min_lon, min_lat, max_lon, max_lat,
+            name, json.dumps(clean),
         )
-    osm_heights = request.app.state.building_osm_heights
-    features = []
-    for r in rows:
-        if not r["geom"]:
-            continue
-        bid = r["lm_building_id"]
-        height = (
-            osm_heights.get(bid)
-            or (float(r["max_floor"]) * 3.2 if r["max_floor"] else 10.0)
-        )
-        features.append({
-            "type": "Feature",
-            "geometry": json.loads(r["geom"]),
-            "properties": {"lm_building_id": bid, "height": height},
-        })
-    return {"type": "FeatureCollection", "features": features}
+    request.app.state.custom_cluster_cols[name] = clean
+    return {"ok": True, "name": name, "count": len(clean)}
+
+
+@app.delete("/api/custom-cluster-cols/{name}")
+async def delete_custom_cluster_col(name: str, request: Request):
+    """Delete a saved custom cluster column."""
+    async with request.app.state.pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM custom_cluster_cols WHERE name = $1", name)
+    request.app.state.custom_cluster_cols.pop(name, None)
+    if result == "DELETE 0":
+        raise HTTPException(404, f"No custom column named '{name}'")
+    return {"ok": True, "name": name}
