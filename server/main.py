@@ -853,6 +853,59 @@ async def get_metadata_full(request: Request):
     ]
 
 
+@app.get("/api/outdoor-sensors")
+async def get_outdoor_sensors(request: Request):
+    """Locations of all outdoor sensors."""
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT sensor_id, lat, lon, properties FROM sensors WHERE sensor_type = 'outdoor' ORDER BY sensor_id"
+        )
+    return [
+        {
+            "sensor_id": r["sensor_id"],
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "address": (r["properties"] or {}).get("address"),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/outdoor-timeseries")
+async def get_outdoor_timeseries(request: Request, year: int = Query(...)):
+    """Hourly outdoor sensor temperatures for a calendar year.
+    15-minute data (e.g. 2023) is averaged to hourly server-side."""
+    import datetime
+    start = datetime.datetime(year, 1, 1, tzinfo=datetime.timezone.utc)
+    end   = datetime.datetime(year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT date_trunc('hour', ts) AS hour,
+                   t.sensor_id,
+                   AVG(temperature)::double precision AS temperature
+            FROM temperatures t
+            JOIN sensors s USING (sensor_id)
+            WHERE s.sensor_type = 'outdoor'
+              AND ts >= $1 AND ts < $2
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+            """,
+            start, end,
+        )
+    timestamps: list[str] = []
+    seen_ts: set[str] = set()
+    sensors: dict[str, list] = {}
+    for r in rows:
+        ts  = r["hour"].isoformat()
+        sid = r["sensor_id"]
+        if ts not in seen_ts:
+            timestamps.append(ts)
+            seen_ts.add(ts)
+        sensors.setdefault(sid, []).append(r["temperature"])
+    return {"timestamps": timestamps, "sensors": sensors}
+
+
 @app.delete("/api/custom-cluster-cols/{name}")
 async def delete_custom_cluster_col(name: str, request: Request):
     """Delete a saved custom cluster column."""

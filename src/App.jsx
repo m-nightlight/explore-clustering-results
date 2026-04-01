@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
+import { HeatmapLayer } from "@deck.gl/aggregation-layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
@@ -1937,6 +1938,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [strangData, setStrangData] = useState(null);
   const [outdoorClimate, setOutdoorClimate] = useState(null); // { year, timestamps, temperature, humidity, global_irradiation }
   const outdoorChartRef = useRef();
+  const [outdoorSensors, setOutdoorSensors] = useState(null);   // [{sensor_id, lat, lon, address}]
+  const [outdoorTimeseries, setOutdoorTimeseries] = useState(null); // {timestamps, sensors, _year}
+  const [showOutdoorSensors, setShowOutdoorSensors] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
 
   const [analysedSensors, setAnalysedSensors] = useState(null);
   const [allClusterProfiles, setAllClusterProfiles] = useState(null);
@@ -2193,6 +2198,24 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     fetchStrangData(fromDate, toDate).then(setStrangData);
   }, [allClusterProfiles]);
 
+  // Fetch outdoor sensor locations once on mount
+  useEffect(() => {
+    fetchData("/api/outdoor-sensors")
+      .then(setOutdoorSensors)
+      .catch(() => {});
+  }, []);
+
+  // Fetch outdoor sensor timeseries (lazy — only when overlay or heatmap is enabled)
+  useEffect(() => {
+    if (!allClusterProfiles?.timestamps?.length) return;
+    if (!showOutdoorSensors && !showHeatmap) return;
+    const year = new Date(allClusterProfiles.timestamps[0]).getFullYear();
+    if (outdoorTimeseries?._year === year) return;
+    fetchData(`/api/outdoor-timeseries?year=${year}`)
+      .then((d) => { if (d?.timestamps) setOutdoorTimeseries({ ...d, _year: year }); })
+      .catch(() => {});
+  }, [allClusterProfiles, showOutdoorSensors, showHeatmap, outdoorTimeseries?._year]);
+
   // Fetch outdoor climate (temperature, humidity, station irradiance) for the data year.
   useEffect(() => {
     if (!allClusterProfiles?.timestamps?.length) return;
@@ -2446,6 +2469,42 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         material: { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
       }));
     }
+    // Outdoor sensor heatmap (temperature at current sun timestamp)
+    if (showHeatmap && heatmapPoints?.length) {
+      ls.push(new HeatmapLayer({
+        id: "outdoor-heatmap",
+        data: heatmapPoints,
+        getPosition: (d) => d.position,
+        getWeight: (d) => d.weight,
+        radiusPixels: 80,
+        intensity: 1.2,
+        threshold: 0.03,
+        colorRange: [
+          [65, 105, 225],   // royal blue  (cold)
+          [100, 180, 220],
+          [180, 220, 180],
+          [255, 230, 100],
+          [255, 140, 0],
+          [200, 30, 30],    // deep red    (hot)
+        ],
+        updateTriggers: { getWeight: [heatmapPoints] },
+      }));
+    }
+    // Outdoor sensor location dots
+    if (showOutdoorSensors && outdoorSensors?.length) {
+      ls.push(new ScatterplotLayer({
+        id: "outdoor-sensors",
+        data: outdoorSensors,
+        getPosition: (d) => [d.lon, d.lat, 0],
+        getFillColor: [255, 140, 0, 220],
+        getLineColor: [255, 255, 255, 180],
+        stroked: true,
+        lineWidthMinPixels: 1,
+        getRadius: 5,
+        radiusUnits: "pixels",
+        pickable: false,
+      }));
+    }
     if (buildingGeometry?.features?.length) {
       ls.push(new GeoJsonLayer({
         id: "buildings",
@@ -2463,7 +2522,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showHeatmap, heatmapPoints, showOutdoorSensors, outdoorSensors]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -2770,6 +2829,33 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return allClusterProfiles.timestamps.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
   }, [allClusterProfiles, strangData]);
 
+  // Current-timestamp heatmap weights for outdoor sensors
+  const heatmapPoints = useMemo(() => {
+    if (!showHeatmap || !outdoorSensors?.length || !outdoorTimeseries?.timestamps?.length || sunTimeIdx === null || !allClusterProfiles?.timestamps) return null;
+    const sunMs = new Date(allClusterProfiles.timestamps[sunTimeIdx]).getTime();
+    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
+    let bestIdx = 0, bestDiff = Infinity;
+    odTms.forEach((t, i) => { const d = Math.abs(t - sunMs); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
+    return outdoorSensors.flatMap((s) => {
+      const temp = outdoorTimeseries.sensors[s.sensor_id]?.[bestIdx];
+      return temp != null ? [{ position: [s.lon, s.lat], weight: temp }] : [];
+    });
+  }, [showHeatmap, outdoorSensors, outdoorTimeseries, sunTimeIdx, allClusterProfiles]);
+
+  // Mean of all outdoor sensors aligned to the indoor timeseries axis (for chart overlay)
+  const outdoorSensorMeanVals = useMemo(() => {
+    if (!showOutdoorSensors || !allClusterProfiles?.timestamps?.length || !outdoorTimeseries?.timestamps?.length) return null;
+    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
+    const sensorIds = Object.keys(outdoorTimeseries.sensors);
+    return allClusterProfiles.timestamps.map((ts) => {
+      const ms = new Date(ts).getTime();
+      let bestIdx = 0, bestDiff = Infinity;
+      odTms.forEach((t, i) => { const d = Math.abs(t - ms); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
+      const vals = sensorIds.map((id) => outdoorTimeseries.sensors[id]?.[bestIdx]).filter((v) => v != null);
+      return vals.length > 0 ? d3.mean(vals) : null;
+    });
+  }, [showOutdoorSensors, allClusterProfiles, outdoorTimeseries]);
+
   // ── Outdoor climate values aligned to sensor timestamps ──
   const outdoorClimateVals = useMemo(() => {
     if (!allClusterProfiles?.timestamps?.length || !outdoorClimate?.timestamps?.length) return null;
@@ -2827,8 +2913,23 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         }
         ctx.stroke(); ctx.setLineDash([]);
       }
+      if (showOutdoorSensors && outdoorSensorMeanVals) {
+        ctx.beginPath();
+        ctx.setLineDash([6, 3]);
+        ctx.strokeStyle = "#ff8c00";
+        ctx.lineWidth = 1.5;
+        let startedOd = false;
+        for (let i = lo; i <= hi; i++) {
+          const v = outdoorSensorMeanVals[i];
+          if (v == null) { startedOd = false; continue; }
+          if (!startedOd) { ctx.moveTo(xScale(i), yScale(v)); startedOd = true; }
+          else ctx.lineTo(xScale(i), yScale(v));
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }, xZoom);
-  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor, xZoom, showOutdoorOverlay, outdoorClimateVals]);
+  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor, xZoom, showOutdoorOverlay, outdoorClimateVals, showOutdoorSensors, outdoorSensorMeanVals]);
 
   useEffect(() => {
     if (analysisTab !== "profiles") return;
@@ -3003,6 +3104,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             <button onClick={() => setShowOutdoorOverlay(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorOverlay ? "#ff8a65" : "#3d4555", color: showOutdoorOverlay ? "#ff8a65" : "#8b949e", background: showOutdoorOverlay ? "#ff8a6522" : "none" }}>
               🌡 Outdoor temp
             </button>
+          )}
+          {outdoorSensors?.length > 0 && (
+            <>
+              <button onClick={() => setShowOutdoorSensors((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorSensors ? "#ff8c00" : "#3d4555", color: showOutdoorSensors ? "#ff8c00" : "#8b949e", background: showOutdoorSensors ? "#ff8c0022" : "none" }}>
+                ◉ Outdoor
+              </button>
+              <button onClick={() => setShowHeatmap((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showHeatmap ? "#e63946" : "#3d4555", color: showHeatmap ? "#e63946" : "#8b949e", background: showHeatmap ? "#e6394622" : "none" }}>
+                ▦ Heatmap
+              </button>
+            </>
           )}
           {analysedSensors && (
             <button onClick={() => setTallPlots(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: tallPlots ? "#58a6ff" : "#3d4555", color: tallPlots ? "#58a6ff" : "#8b949e", background: tallPlots ? "#58a6ff22" : "none" }}>

@@ -11,8 +11,12 @@ CREATE TABLE IF NOT EXISTS sensors (
     cluster             SMALLINT,
     domain_code         TEXT,
     area                TEXT,
+    sensor_type         TEXT NOT NULL DEFAULT 'indoor',
     properties          JSONB NOT NULL DEFAULT '{}'
 );
+
+-- Add sensor_type to existing deployments that pre-date this column
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS sensor_type TEXT NOT NULL DEFAULT 'indoor';
 
 CREATE INDEX IF NOT EXISTS idx_sensors_geom    ON sensors USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_sensors_cluster ON sensors (cluster);
