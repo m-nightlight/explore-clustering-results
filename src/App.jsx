@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
-import { HeatmapLayer } from "@deck.gl/aggregation-layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { SphereGeometry } from "@luma.gl/engine";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
@@ -26,6 +25,23 @@ const resolveStyle = (url) =>
     ? `https://api.mapbox.com/styles/v1/${url.slice(16)}?access_token=${MAPBOX_TOKEN}`
     : url;
 const hexToRgb = (hex) => [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+
+// 6-stop blue→red temperature color scale (matches the former HeatmapLayer colorRange)
+const TEMP_COLOR_STOPS = [
+  [65, 105, 225],   // cold  (blue)
+  [100, 180, 220],
+  [180, 220, 180],  // mild  (green-ish)
+  [255, 230, 100],
+  [255, 140, 0],    // warm  (orange)
+  [200, 30,  30],   // hot   (red)
+];
+function tempToColor(temp, min, max) {
+  const t = Math.max(0, Math.min(1, (temp - min) / Math.max(1, max - min)));
+  const scaled = t * (TEMP_COLOR_STOPS.length - 1);
+  const lo = Math.floor(scaled), hi = Math.min(lo + 1, TEMP_COLOR_STOPS.length - 1);
+  const f = scaled - lo;
+  return TEMP_COLOR_STOPS[lo].map((c, i) => Math.round(c + f * (TEMP_COLOR_STOPS[hi][i] - c)));
+}
 
 const API = "http://localhost:8000";
 
@@ -2391,8 +2407,11 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return ls;
   }, [showSunArc, mode3D, sunTimestampMs, sunInfo, viewState.latitude, viewState.longitude]);
 
-  // Current-timestamp heatmap weights for outdoor sensors
-  const heatmapPoints = useMemo(() => {
+  // Fixed summer temperature range for a consistent color scale
+  const outdoorTempRange = { min: 5, max: 35 };
+
+  // Per-sensor temperature at the current sun timestamp, for the colored scatter layer
+  const tempPoints = useMemo(() => {
     if (!showHeatmap || !outdoorSensors?.length || !outdoorTimeseries?.timestamps?.length || sunTimeIdx === null || !allClusterProfiles?.timestamps) return null;
     const sunMs = new Date(allClusterProfiles.timestamps[sunTimeIdx]).getTime();
     const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
@@ -2400,7 +2419,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     odTms.forEach((t, i) => { const d = Math.abs(t - sunMs); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
     return outdoorSensors.flatMap((s) => {
       const temp = outdoorTimeseries.sensors[s.sensor_id]?.[bestIdx];
-      return temp != null ? [{ position: [s.lon, s.lat], weight: temp }] : [];
+      return temp != null ? [{ position: [s.lon, s.lat], temp }] : [];
     });
   }, [showHeatmap, outdoorSensors, outdoorTimeseries, sunTimeIdx, allClusterProfiles]);
 
@@ -2507,25 +2526,23 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         material: { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
       }));
     }
-    // Outdoor sensor heatmap (temperature at current sun timestamp)
-    if (showHeatmap && heatmapPoints?.length) {
-      ls.push(new HeatmapLayer({
-        id: "outdoor-heatmap",
-        data: heatmapPoints,
+    // Outdoor sensor temperature — one dot per sensor, colored by actual temperature
+    if (showHeatmap && tempPoints?.length) {
+      const { min, max } = outdoorTempRange;
+      ls.push(new ScatterplotLayer({
+        id: "outdoor-temp",
+        data: tempPoints,
         getPosition: (d) => d.position,
-        getWeight: (d) => d.weight,
-        radiusPixels: 80,
-        intensity: 1.2,
-        threshold: 0.03,
-        colorRange: [
-          [65, 105, 225],   // royal blue  (cold)
-          [100, 180, 220],
-          [180, 220, 180],
-          [255, 230, 100],
-          [255, 140, 0],
-          [200, 30, 30],    // deep red    (hot)
-        ],
-        updateTriggers: { getWeight: [heatmapPoints] },
+        getFillColor: (d) => [...tempToColor(d.temp, min, max), 230],
+        getLineColor: [30, 30, 30, 180],
+        stroked: true,
+        lineWidthMinPixels: 1,
+        getRadius: 60,
+        radiusUnits: "meters",
+        radiusMinPixels: 10,
+        radiusMaxPixels: 40,
+        pickable: false,
+        updateTriggers: { getFillColor: [tempPoints, min, max] },
       }));
     }
     // Outdoor sensor location dots
@@ -2560,7 +2577,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showHeatmap, heatmapPoints, showOutdoorSensors, outdoorSensors]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -2965,7 +2982,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
   // ── Outdoor sensors chart ──
   useEffect(() => {
-    if (!showOutdoorSensors || !outdoorSensorsAligned || !outdoorSensorsCanvasRef.current) return;
+    if (!showOutdoorSensors && !showHeatmap) return;
+    if (!outdoorSensorsAligned || !outdoorSensorsCanvasRef.current) return;
     if (!allClusterProfiles?.timestamps?.length) return;
     const { sensors, mean, sensorIds } = outdoorSensorsAligned;
     const smhiTemps = outdoorClimateVals ? outdoorClimateVals.map((d) => d.temp) : [];
@@ -3020,7 +3038,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         ctx.fillText("SMHI station", xScale(hi) - 2, yScale(outdoorClimateVals[hi]?.temp ?? allVals[0]) - 4);
       }
     }, xZoom);
-  }, [showOutdoorSensors, outdoorSensorsAligned, allClusterProfiles, drawChart, xZoom, outdoorClimateVals, showOutdoorOverlay]);
+  }, [showOutdoorSensors, showHeatmap, outdoorSensorsAligned, allClusterProfiles, drawChart, xZoom, outdoorClimateVals, showOutdoorOverlay]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -3438,6 +3456,25 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             </div>
           )}
 
+          {/* Temperature color legend */}
+          {showHeatmap && tempPoints?.length && (() => {
+            const { min, max } = outdoorTempRange;
+            const stops = TEMP_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",");
+            const ticks = [min, Math.round((min + max) / 2), max];
+            return (
+              <div style={{ position: "absolute", bottom: 32, left: 12, zIndex: 5, pointerEvents: "none",
+                background: "rgba(26,30,40,0.82)", backdropFilter: "blur(4px)",
+                border: "1px solid #2e3440", borderRadius: 6, padding: "6px 10px",
+                fontFamily: "monospace", fontSize: 10, color: "#c9d1d9" }}>
+                <div style={{ marginBottom: 3 }}>Outdoor temp (°C)</div>
+                <div style={{ width: 120, height: 10, borderRadius: 3, background: `linear-gradient(to right, ${stops})` }} />
+                <div style={{ display: "flex", justifyContent: "space-between", width: 120, marginTop: 2 }}>
+                  {ticks.map((t) => <span key={t}>{t}</span>)}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Box zoom overlay */}
           {boxZoomActive && (
             <div ref={boxOverlayRef} style={{ position: "absolute", inset: 0, cursor: "crosshair", zIndex: 10 }}
@@ -3621,10 +3658,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         );
                       })()}
                     </div>
-                    {showOutdoorSensors && outdoorSensorsAligned && (
+                    {(showOutdoorSensors || showHeatmap) && outdoorSensorsAligned && (
                       <>
                         <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
-                          Outdoor sensors — {outdoorSensorsAligned.sensorIds.length} stations (orange), mean (bold){showOutdoorOverlay ? ", SMHI station (dashed)" : ""}
+                          Outdoor sensors — {outdoorSensorsAligned.sensorIds.length} stations{showOutdoorSensors ? " (orange), mean (bold)" : ", mean (bold)"}{showOutdoorOverlay ? ", SMHI (dashed)" : ""}
                         </p>
                         <div style={{ position: "relative" }}>
                           <canvas ref={outdoorSensorsCanvasRef} style={{ ...styles.canvas, height: tallPlots ? 420 : 160 }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }} />
