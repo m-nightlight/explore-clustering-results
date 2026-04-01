@@ -134,7 +134,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -832,6 +832,25 @@ async def upsert_custom_cluster_col(name: str, request: Request):
         )
     request.app.state.custom_cluster_cols[name] = clean
     return {"ok": True, "name": name, "count": len(clean)}
+
+
+@app.get("/api/metadata-full")
+async def get_metadata_full(request: Request):
+    """All sensors with flattened JSONB properties for global metadata statistics.
+    Returns every sensor regardless of viewport; GZip middleware compresses the response."""
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT sensor_id, domain_code, area, properties FROM sensors ORDER BY sensor_id"
+        )
+    return [
+        {
+            "sensor_id":   r["sensor_id"],
+            "domain_code": r["domain_code"],
+            "area":        r["area"],
+            **(r["properties"] or {}),
+        }
+        for r in rows
+    ]
 
 
 @app.delete("/api/custom-cluster-cols/{name}")

@@ -31,7 +31,7 @@ const API = "http://localhost:8000";
 // ─── Theme & Constants ───────────────────────────────────────────
 const COLORS = [
   "#E63946","#457B9D","#2A9D8F","#E9C46A","#F4A261",
-  "#264653","#A8DADC","#6A0572","#AB83A1","#1D3557",
+  "#6BCB77","#A8DADC","#6A0572","#AB83A1","#1D3557",
   "#F77F00","#D62828","#023E8A","#0077B6","#00B4D8",
   "#90BE6D","#F94144","#277DA1","#577590","#4D908E",
   "#43AA8B","#F3722C","#F8961E","#F9844A","#F9C74F",
@@ -56,9 +56,10 @@ const fetchData = async (endpoint) => {
 
 // ─── Tabs ────────────────────────────────────────────────────────
 const TABS = [
-  { id: "profiles", label: "Cluster Profiles", icon: "◈" },
-  { id: "timeseries", label: "Time Series", icon: "◆" },
-  { id: "map", label: "Sensor Map", icon: "◉" },
+  { id: "profiles",  label: "Cluster Profiles",     icon: "◈" },
+  { id: "timeseries",label: "Time Series",          icon: "◆" },
+  { id: "metadata",  label: "Metadata Statistics",  icon: "▦" },
+  { id: "map",       label: "Sensor Map",           icon: "◉" },
 ];
 
 // ─── Main App ────────────────────────────────────────────────────
@@ -103,9 +104,15 @@ export default function App() {
 
   useEffect(() => {
     if (clusterColumns.length > 0 && !selectedK) {
-      setSelectedK(clusterColumns[0]);
+      const saved = localStorage.getItem("sensorExplorer_selectedK");
+      setSelectedK(saved && clusterColumns.includes(saved) ? saved : clusterColumns[0]);
     }
   }, [clusterColumns]);
+
+  // Persist active cluster column selection
+  useEffect(() => {
+    if (selectedK) localStorage.setItem("sensorExplorer_selectedK", selectedK);
+  }, [selectedK]);
 
   // Get unique clusters for selected k
   const clusters = useMemo(() => {
@@ -168,7 +175,8 @@ export default function App() {
         setCustomClusterCols(Object.fromEntries(savedCols.map(({ name, mapping }) => [name, mapping])));
         setClusterColumns((prev) => {
           const names = savedCols.map((c) => c.name);
-          return [...prev, ...names.filter((n) => !prev.includes(n))];
+          const builtins = prev.filter((c) => !names.includes(c));
+          return [...names, ...builtins]; // CSV cols first
         });
       }
     } catch (e) {
@@ -219,7 +227,7 @@ export default function App() {
   const addCustomClusterCol = (colName, mapping) => {
     setCustomClusterCols((prev) => ({ ...prev, [colName]: mapping }));
     setMetadataData((prev) => prev.map((r) => ({ ...r, [colName]: mapping[r.sensor_id] ?? null })));
-    setClusterColumns((prev) => (prev.includes(colName) ? prev : [...prev, colName]));
+    setClusterColumns((prev) => (prev.includes(colName) ? prev : [colName, ...prev]));
   };
 
   const removeCustomClusterCol = (colName) => {
@@ -285,6 +293,13 @@ export default function App() {
     return gi !== undefined ? GROUP_COLORS[gi % GROUP_COLORS.length] : getClusterColor(ci >= 0 ? ci : 0);
   }, [clusterToGroupIdx]);
 
+  // Cross-tab navigation: MetadataStats → Map
+  const [navigateToBuilding, setNavigateToBuilding] = useState(null);
+  const handleNavigateToBuilding = useCallback((bid, lat, lon) => {
+    setNavigateToBuilding({ bid, lat, lon, ts: Date.now() });
+    setActiveTab("map");
+  }, []);
+
   const togglePending = (c) => {
     setPendingGroupMembers((prev) => {
       const next = new Set(prev);
@@ -324,9 +339,25 @@ export default function App() {
                 onChange={(e) => setSelectedK(e.target.value)}
                 style={styles.select}
               >
-                {clusterColumns.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
+                {(() => {
+                  const csvNames = new Set(Object.keys(customClusterCols));
+                  const csvCols = clusterColumns.filter((c) => csvNames.has(c));
+                  const builtinCols = clusterColumns.filter((c) => !csvNames.has(c));
+                  return (
+                    <>
+                      {csvCols.length > 0 && (
+                        <optgroup label="CSV imports">
+                          {csvCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </optgroup>
+                      )}
+                      {builtinCols.length > 0 && (
+                        <optgroup label="Built-in">
+                          {builtinCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </optgroup>
+                      )}
+                    </>
+                  );
+                })()}
               </select>
               <span style={styles.kBadge}>{clusters.length} clusters</span>
               {Object.keys(customClusterCols).map((colName) => (
@@ -492,6 +523,17 @@ export default function App() {
                 customColMapping={customClusterCols[selectedK] ?? null}
               />
             )}
+            {activeTab === "metadata" && (
+              <MetadataStats
+                metadataData={metadataData}
+                selectedK={selectedK}
+                clusters={clusters}
+                selectedClusters={selectedClusters}
+                getEffectiveClusterColor={getEffectiveClusterColor}
+                customClusterCols={customClusterCols}
+                onNavigateToBuilding={handleNavigateToBuilding}
+              />
+            )}
             {activeTab === "map" && (
               <MapView
                 metadataData={metadataData}
@@ -502,6 +544,7 @@ export default function App() {
                 clusterGroups={clusterGroups}
                 getEffectiveClusterColor={getEffectiveClusterColor}
                 customClusterCols={customClusterCols}
+                navigateToBuilding={navigateToBuilding}
               />
             )}
 
@@ -512,6 +555,636 @@ export default function App() {
   );
 }
 
+
+// ─── Metadata Statistics helpers ─────────────────────────────────
+
+function classifyColumn(key, rows) {
+  const vals = rows.map((r) => r[key]).filter((v) => v != null && v !== "");
+  if (vals.length < 2) return null;
+  const unique = [...new Set(vals.map(String))];
+  if (unique.length <= 1) return null;
+  const numeric = vals.every((v) => !isNaN(Number(v)));
+  if (numeric) {
+    const nums = vals.map(Number);
+    const uNums = new Set(nums);
+    return uNums.size > 20 ? "continuous" : "ordinal";
+  }
+  if (unique.length <= 40) return "categorical";
+  return null; // too many categories — skip
+}
+
+// Chi-squared test of independence: returns a p-value bucket string
+function chiSquaredPBucket(rows, key, selectedK) {
+  const counts = {};
+  rows.forEach((r) => {
+    const cat = String(r[key] ?? "__null");
+    const cid = String(r[selectedK] ?? "__null");
+    if (!counts[cat]) counts[cat] = {};
+    counts[cat][cid] = (counts[cat][cid] || 0) + 1;
+  });
+  const cats = Object.keys(counts);
+  const cids = [...new Set(rows.map((r) => String(r[selectedK] ?? "__null")))];
+  const rowTotals = cats.map((c) => Object.values(counts[c]).reduce((s, n) => s + n, 0));
+  const colTotals = {};
+  cids.forEach((cid) => { colTotals[cid] = cats.reduce((s, c) => s + (counts[c][cid] || 0), 0); });
+  const n = rowTotals.reduce((s, v) => s + v, 0);
+  if (n === 0) return null;
+  let chi2 = 0;
+  cats.forEach((c, ci) => {
+    cids.forEach((cid) => {
+      const O = counts[c][cid] || 0;
+      const E = (rowTotals[ci] * colTotals[cid]) / n;
+      if (E > 0) chi2 += (O - E) ** 2 / E;
+    });
+  });
+  const df = (cats.length - 1) * (cids.length - 1);
+  if (df <= 0) return null;
+  // Approximation: use chi2/df ratio as a proxy for significance thresholds
+  const ratio = chi2 / df;
+  if (ratio > 10)  return { label: "p < 0.001", color: "#2a9d8f" };
+  if (ratio > 5)   return { label: "p < 0.01",  color: "#57cc99" };
+  if (ratio > 2.5) return { label: "p < 0.05",  color: "#e9c46a" };
+  return { label: "n.s.", color: "#556677" };
+}
+
+// Kruskal-Wallis H proxy for continuous columns
+function kwPBucket(rows, key, selectedK) {
+  const groups = {};
+  rows.forEach((r) => {
+    const v = Number(r[key]);
+    if (isNaN(v)) return;
+    const cid = String(r[selectedK] ?? "__null");
+    if (!groups[cid]) groups[cid] = [];
+    groups[cid].push(v);
+  });
+  const gVals = Object.values(groups).filter((g) => g.length >= 2);
+  if (gVals.length < 2) return null;
+  const allVals = gVals.flat().sort((a, b) => a - b);
+  const n = allVals.length;
+  const rankMap = new Map();
+  allVals.forEach((v, i) => {
+    if (!rankMap.has(v)) rankMap.set(v, []);
+    rankMap.get(v).push(i + 1);
+  });
+  const avgRank = (v) => { const rs = rankMap.get(v); return rs.reduce((s, r) => s + r, 0) / rs.length; };
+  const H = (12 / (n * (n + 1))) *
+    gVals.reduce((s, g) => s + (g.length * (d3.mean(g.map(avgRank)) - (n + 1) / 2) ** 2), 0);
+  const df = gVals.length - 1;
+  const ratio = H / df;
+  if (ratio > 10)  return { label: "p < 0.001", color: "#2a9d8f" };
+  if (ratio > 5)   return { label: "p < 0.01",  color: "#57cc99" };
+  if (ratio > 2.5) return { label: "p < 0.05",  color: "#e9c46a" };
+  return { label: "n.s.", color: "#556677" };
+}
+
+function renderMetaStackedBars(canvas, rows, key, selectedK, clusters, normalize, colorFn) {
+  if (!canvas || !rows?.length) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
+
+  const ML = 40, MR = 12, MT = 10, MB = 52;
+  const pw = w - ML - MR, ph = h - MT - MB;
+  ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
+
+  // Build counts[label][clusterId]
+  const counts = {};
+  rows.forEach((r) => {
+    const lbl = String(r[key] ?? "—");
+    const cid = r[selectedK];
+    if (cid == null) return;
+    if (!counts[lbl]) counts[lbl] = {};
+    counts[lbl][cid] = (counts[lbl][cid] || 0) + 1;
+  });
+  const labels = Object.keys(counts).sort();
+  if (!labels.length) return;
+
+  const clusterTotals = {};
+  clusters.forEach((c) => { clusterTotals[c] = rows.filter((r) => r[selectedK] === c).length || 1; });
+
+  const barW = Math.max(3, pw / labels.length - 2);
+  const gap = Math.max(1, (pw - barW * labels.length) / Math.max(1, labels.length - 1));
+
+  // y-axis: max stack height
+  const maxVal = normalize
+    ? 100
+    : Math.max(...labels.map((l) => clusters.reduce((s, c) => s + (counts[l][c] || 0), 0)), 1);
+
+  // Grid
+  ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75, 1].forEach((pct) => {
+    const y = MT + ph * (1 - pct);
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
+    ctx.fillStyle = "#8899bb"; ctx.font = "9px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(normalize ? `${Math.round(pct * 100)}%` : Math.round(pct * maxVal), ML - 4, y + 3);
+  });
+
+  // Bars
+  labels.forEach((lbl, i) => {
+    const x = ML + i * (barW + gap);
+    const stackTotal = clusters.reduce((s, c) => s + (counts[lbl][c] || 0), 0);
+    let y = MT + ph;
+    clusters.forEach((c, ci) => {
+      const raw = counts[lbl][c] || 0;
+      if (!raw) return;
+      const val = normalize ? (raw / (clusterTotals[c] || 1)) * 100 : raw;
+      const barH = Math.max(1, (val / maxVal) * ph);
+      ctx.fillStyle = colorFn(c);
+      ctx.fillRect(x, y - barH, barW, barH);
+      y -= barH;
+    });
+    // x label
+    ctx.save();
+    ctx.translate(x + barW / 2, MT + ph + 8);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = "#667788"; ctx.font = "8px system-ui, sans-serif"; ctx.textAlign = "left";
+    ctx.fillText(lbl.length > 14 ? lbl.slice(0, 13) + "…" : lbl, 0, 0);
+    ctx.restore();
+  });
+}
+
+function renderMetaBoxPlots(canvas, rows, key, selectedK, clusters, colorFn) {
+  if (!canvas || !rows?.length) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
+
+  const ML = 44, MR = 12, MT = 10, MB = 28;
+  const pw = w - ML - MR, ph = h - MT - MB;
+  ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
+
+  const grouped = {};
+  clusters.forEach((c) => { grouped[c] = []; });
+  rows.forEach((r) => {
+    const v = Number(r[key]);
+    const c = r[selectedK];
+    if (!isNaN(v) && c != null && grouped[c]) grouped[c].push(v);
+  });
+
+  const allVals = Object.values(grouped).flat();
+  if (!allVals.length) return;
+  // Clip axis to 1–99th percentile; whiskers/outliers beyond are clipped at the edge
+  const sortedAll = [...allVals].sort((a, b) => a - b);
+  const yMin = d3.quantile(sortedAll, 0.01);
+  const yMax = d3.quantile(sortedAll, 0.99);
+  const yPad = (yMax - yMin) * 0.05 || 1;
+  const yScale = d3.scaleLinear().domain([yMin - yPad, yMax + yPad]).range([MT + ph, MT]);
+
+  // Grid
+  ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
+  yScale.ticks(4).forEach((t) => {
+    const y = yScale(t);
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(ML + pw, y); ctx.stroke();
+    ctx.fillStyle = "#8899bb"; ctx.font = "9px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(t % 1 === 0 ? t : t.toFixed(1), ML - 4, y + 3);
+  });
+
+  const boxW = Math.min(28, pw / clusters.length * 0.6);
+  const step = pw / clusters.length;
+
+  clusters.forEach((c, ci) => {
+    const vals = grouped[c].sort((a, b) => a - b);
+    if (vals.length < 2) return;
+    const x = ML + ci * step + step / 2;
+    const q1 = d3.quantile(vals, 0.25);
+    const med = d3.quantile(vals, 0.5);
+    const q3 = d3.quantile(vals, 0.75);
+    const iqr = q3 - q1;
+    const wLo = Math.max(vals[0], q1 - 1.5 * iqr);
+    const wHi = Math.min(vals[vals.length - 1], q3 + 1.5 * iqr);
+    const color = colorFn(c);
+    const [r, g, b] = hexToRgb(color);
+
+    // Box fill
+    ctx.fillStyle = `rgba(${r},${g},${b},0.18)`;
+    ctx.fillRect(x - boxW / 2, yScale(q3), boxW, yScale(q1) - yScale(q3));
+    // Box border
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - boxW / 2, yScale(q3), boxW, yScale(q1) - yScale(q3));
+    // Median
+    ctx.beginPath(); ctx.moveTo(x - boxW / 2, yScale(med)); ctx.lineTo(x + boxW / 2, yScale(med));
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.stroke();
+    // Whiskers
+    ctx.lineWidth = 1; ctx.strokeStyle = color + "aa";
+    ctx.beginPath(); ctx.moveTo(x, yScale(q1)); ctx.lineTo(x, yScale(wLo)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, yScale(q3)); ctx.lineTo(x, yScale(wHi)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - boxW / 4, yScale(wLo)); ctx.lineTo(x + boxW / 4, yScale(wLo)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - boxW / 4, yScale(wHi)); ctx.lineTo(x + boxW / 4, yScale(wHi)); ctx.stroke();
+    // Cluster label
+    ctx.fillStyle = "#8899bb"; ctx.font = "9px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`C${c}`, x, MT + ph + 16);
+  });
+}
+
+function renderMetaKDE(canvas, rows, key, selectedK, clusters, colorFn) {
+  if (!canvas || !rows?.length) return;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr);
+
+  const ML = 44, MR = 12, MT = 10, MB = 24;
+  const pw = w - ML - MR, ph = h - MT - MB;
+  ctx.fillStyle = "#1a1f2e"; ctx.fillRect(0, 0, w, h);
+
+  const grouped = {};
+  clusters.forEach((c) => { grouped[c] = []; });
+  rows.forEach((r) => {
+    const v = Number(r[key]);
+    const c = r[selectedK];
+    if (!isNaN(v) && c != null && grouped[c]) grouped[c].push(v);
+  });
+
+  const allVals = Object.values(grouped).flat();
+  if (allVals.length < 4) return;
+  // Clip to 2–98th percentile so outliers don't squash the distribution
+  const sorted = [...allVals].sort((a, b) => a - b);
+  const xMin = d3.quantile(sorted, 0.02);
+  const xMax = d3.quantile(sorted, 0.98);
+  const xPad = (xMax - xMin) * 0.1 || 1;
+  const xScale = d3.scaleLinear().domain([xMin - xPad, xMax + xPad]).range([ML, ML + pw]);
+  const xGrid = d3.range(xMin - xPad, xMax + xPad, (xMax - xMin + 2 * xPad) / 200);
+
+  const gaussian = (u) => Math.exp(-0.5 * u * u) / Math.sqrt(2 * Math.PI);
+  const densities = {};
+  clusters.forEach((c) => {
+    const data = grouped[c];
+    if (data.length < 2) return;
+    const std = d3.deviation(data) || 1;
+    const bw = Math.max(0.5, 1.06 * std * Math.pow(data.length, -0.2));
+    densities[c] = xGrid.map((x) => d3.mean(data, (v) => gaussian((x - v) / bw) / bw));
+  });
+
+  const maxD = Math.max(...Object.values(densities).flat(), 1e-9);
+  const yScale = d3.scaleLinear().domain([0, maxD * 1.1]).range([MT + ph, MT]);
+
+  // Grid
+  ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
+  xScale.ticks(5).forEach((t) => {
+    const x = xScale(t);
+    ctx.beginPath(); ctx.moveTo(x, MT); ctx.lineTo(x, MT + ph); ctx.stroke();
+    ctx.fillStyle = "#8899bb"; ctx.font = "9px system-ui, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(t % 1 === 0 ? t : t.toFixed(1), x, MT + ph + 14);
+  });
+  ctx.fillStyle = "#445566"; ctx.font = "8px system-ui, sans-serif"; ctx.textAlign = "right";
+  ctx.fillText("2–98%ile", ML + pw, MT - 2);
+
+  // KDE fills + lines
+  clusters.forEach((c) => {
+    const pts = densities[c];
+    if (!pts) return;
+    const color = colorFn(c);
+    const [r, g, b] = hexToRgb(color);
+
+    ctx.beginPath();
+    ctx.moveTo(xScale(xGrid[0]), yScale(0));
+    xGrid.forEach((x, i) => ctx.lineTo(xScale(x), yScale(pts[i])));
+    ctx.lineTo(xScale(xGrid[xGrid.length - 1]), yScale(0));
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${r},${g},${b},0.15)`; ctx.fill();
+
+    ctx.beginPath();
+    xGrid.forEach((x, i) => i === 0 ? ctx.moveTo(xScale(x), yScale(pts[i])) : ctx.lineTo(xScale(x), yScale(pts[i])));
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  });
+}
+
+// ─── Building cluster panel ───────────────────────────────────────
+function BuildingClusterPanel({ enrichedRows, selectedK, clusters, colorFn, onNavigateToBuilding }) {
+  const [sortMode, setSortMode] = useState("dominant"); // "dominant" | "mixed"
+  const [minSensors, setMinSensors] = useState(2);
+  const [search, setSearch] = useState("");
+
+  const buildingStats = useMemo(() => {
+    if (!enrichedRows?.length || !selectedK) return [];
+    const groups = {};
+    enrichedRows.forEach((r) => {
+      const bid = r["lm_building_id"] || r["area"] || "Unknown";
+      if (!groups[bid]) groups[bid] = { sensors: [], lats: [], lons: [] };
+      groups[bid].sensors.push(r);
+      if (r.lat != null) groups[bid].lats.push(Number(r.lat));
+      if (r.lon != null) groups[bid].lons.push(Number(r.lon));
+    });
+
+    return Object.entries(groups).map(([bid, { sensors, lats, lons }]) => {
+      const counts = {};
+      sensors.forEach((s) => {
+        const cid = s[selectedK];
+        if (cid != null) counts[String(cid)] = (counts[String(cid)] || 0) + 1;
+      });
+      const total = Object.values(counts).reduce((s, v) => s + v, 0);
+      if (total < 1) return null;
+      const sorted = Object.entries(counts).sort(([, a], [, b]) => b - a);
+      const top1Pct = total > 0 ? (sorted[0]?.[1] || 0) / total : 0;
+      const top2Pct = total > 0 ? ((sorted[0]?.[1] || 0) + (sorted[1]?.[1] || 0)) / total : 0;
+      const avgLat = lats.length ? lats.reduce((s, v) => s + v, 0) / lats.length : null;
+      const avgLon = lons.length ? lons.reduce((s, v) => s + v, 0) / lons.length : null;
+      return { bid, total, counts, sorted, top1Pct, top2Pct, avgLat, avgLon };
+    }).filter(Boolean);
+  }, [enrichedRows, selectedK]);
+
+  const filtered = useMemo(() => {
+    let rows = buildingStats.filter((b) => b.total >= minSensors);
+    if (search) rows = rows.filter((b) => b.bid.toLowerCase().includes(search.toLowerCase()));
+    if (sortMode === "dominant") {
+      rows = [...rows].sort((a, b) => b.top1Pct - a.top1Pct);
+    } else {
+      // "mixed": sort by how evenly top-2 clusters share (top2 close to 100%, top1 not too high)
+      rows = [...rows].sort((a, b) => {
+        const mixA = a.top2Pct - a.top1Pct; // higher = more even split between top-2
+        const mixB = b.top2Pct - b.top1Pct;
+        return mixB - mixA;
+      });
+    }
+    return rows;
+  }, [buildingStats, sortMode, minSensors, search]);
+
+  if (!enrichedRows?.length) return null;
+
+  return (
+    <div style={{ borderTop: "1px solid #2e3440", marginTop: 18, paddingTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 600, color: "#c9d1d9" }}>Building cluster affinity</span>
+        <span style={{ fontSize: 10, color: "#556677" }}>{filtered.length} buildings</span>
+        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+          {["dominant", "mixed"].map((m) => (
+            <button key={m} onClick={() => setSortMode(m)}
+              style={{ fontSize: 9, padding: "2px 8px", borderRadius: 4, cursor: "pointer",
+                border: `1px solid ${sortMode === m ? "#457B9D" : "#3d4555"}`,
+                background: sortMode === m ? "#457B9D22" : "transparent",
+                color: sortMode === m ? "#4CC9F0" : "#8b949e" }}>
+              {m === "dominant" ? "Most homogeneous" : "Most mixed"}
+            </button>
+          ))}
+        </div>
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter…"
+          style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, border: "1px solid #3d4555",
+            background: "#141820", color: "#c9d1d9", width: 90 }} />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 340, overflowY: "auto" }}>
+        {filtered.slice(0, 120).map(({ bid, total, sorted, top1Pct, avgLat, avgLon }) => (
+          <div key={bid}
+            onClick={() => onNavigateToBuilding?.(bid, avgLat, avgLon)}
+            title={`${bid} — click to view on map`}
+            style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px",
+              borderRadius: 5, cursor: "pointer", background: "#1d2232",
+              border: "1px solid #252c3d", transition: "border-color 0.15s" }}
+            onMouseEnter={(e) => e.currentTarget.style.borderColor = "#457B9D"}
+            onMouseLeave={(e) => e.currentTarget.style.borderColor = "#252c3d"}
+          >
+            {/* Building name */}
+            <span style={{ fontSize: 10, color: "#c9d1d9", width: 140, flexShrink: 0,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={bid}>
+              {bid}
+            </span>
+            {/* Sensor count */}
+            <span style={{ fontSize: 9, color: "#556677", width: 28, textAlign: "right", flexShrink: 0 }}>
+              {total}
+            </span>
+            {/* Stacked proportion bar */}
+            <div style={{ flex: 1, height: 8, borderRadius: 3, overflow: "hidden", display: "flex", minWidth: 60 }}>
+              {sorted.map(([cidStr, cnt]) => (
+                <div key={cidStr}
+                  title={`C${cidStr}: ${Math.round(cnt / total * 100)}%`}
+                  style={{ width: `${cnt / total * 100}%`, background: colorFn(Number(cidStr)), height: "100%" }} />
+              ))}
+            </div>
+            {/* Top cluster label(s) */}
+            <div style={{ display: "flex", gap: 3, flexShrink: 0, minWidth: 56 }}>
+              {sorted.slice(0, 3).map(([cidStr, cnt]) => {
+                const pct = Math.round(cnt / total * 100);
+                if (pct < 10) return null;
+                return (
+                  <span key={cidStr} style={{ fontSize: 9, padding: "1px 4px", borderRadius: 3,
+                    background: colorFn(Number(cidStr)) + "33", color: colorFn(Number(cidStr)),
+                    border: `1px solid ${colorFn(Number(cidStr))}55` }}>
+                    C{cidStr} {pct}%
+                  </span>
+                );
+              })}
+            </div>
+            {/* Map icon */}
+            <span style={{ fontSize: 10, color: "#3d4555", flexShrink: 0 }}>⌖</span>
+          </div>
+        ))}
+        {filtered.length > 120 && (
+          <p style={{ fontSize: 9, color: "#445566", textAlign: "center", margin: "4px 0 0" }}>
+            Showing 120 of {filtered.length}. Use filter to narrow results.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── MetadataStats component ──────────────────────────────────────
+const SKIP_COLS = new Set(["sensor_id", "lat", "lon", "lm_building_id", "geom", "building_geom"]);
+
+function MetadataStats({ metadataData, selectedK, clusters, selectedClusters, getEffectiveClusterColor, customClusterCols, onNavigateToBuilding }) {
+  const [fullData, setFullData] = useState(null);
+  const [loadingFull, setLoadingFull] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
+  const [normalize, setNormalize] = useState(false);
+  const [sortBySig, setSortBySig] = useState(true);
+  const hasFetched = useRef(false);
+
+  // Lazy-fetch once on first render
+  useEffect(() => {
+    if (hasFetched.current) return;
+    hasFetched.current = true;
+    setLoadingFull(true);
+    setFetchError(null);
+    fetch(`${API}/api/metadata-full`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((data) => {
+        if (!Array.isArray(data)) throw new Error("Unexpected response format");
+        setFullData(data);
+        setLoadingFull(false);
+      })
+      .catch((e) => { setFetchError(e.message); setLoadingFull(false); });
+  }, []);
+
+  // Merge fullData with metadataData to get cluster assignments (incl. custom CSV cols)
+  const enrichedRows = useMemo(() => {
+    if (!Array.isArray(fullData) || !metadataData) return null;
+    const metaMap = Object.fromEntries(metadataData.map((r) => [r.sensor_id, r]));
+    return fullData.map((r) => ({ ...r, ...(metaMap[r.sensor_id] || {}) }));
+  }, [fullData, metadataData]);
+
+  // Discover and classify columns
+  const columnDefs = useMemo(() => {
+    if (!enrichedRows?.length || !selectedK) return [];
+    const clusterCols = new Set(
+      Object.keys(enrichedRows[0]).filter((k) =>
+        k.toLowerCase().includes("cluster") || k.toLowerCase().startsWith("k_") || k.match(/^k\d+/)
+      )
+    );
+    // Also skip the selectedK itself and custom col keys
+    [...Object.keys(customClusterCols), selectedK].forEach((k) => clusterCols.add(k));
+
+    return Object.keys(enrichedRows[0])
+      .filter((k) => !SKIP_COLS.has(k) && !clusterCols.has(k))
+      .map((k) => ({ key: k, type: classifyColumn(k, enrichedRows) }))
+      .filter((d) => d.type !== null);
+  }, [enrichedRows, selectedK, customClusterCols]);
+
+  // Compute significance for each column (wrapped in try-catch per column)
+  const sigMap = useMemo(() => {
+    if (!enrichedRows || !selectedK) return {};
+    const result = {};
+    columnDefs.forEach(({ key, type }) => {
+      try {
+        result[key] = type === "continuous"
+          ? kwPBucket(enrichedRows, key, selectedK)
+          : chiSquaredPBucket(enrichedRows, key, selectedK);
+      } catch { result[key] = null; }
+    });
+    return result;
+  }, [enrichedRows, columnDefs, selectedK]);
+
+  const sortedCols = useMemo(() => {
+    if (!sortBySig) return columnDefs;
+    const order = { "p < 0.001": 0, "p < 0.01": 1, "p < 0.05": 2, "n.s.": 3 };
+    return [...columnDefs].sort((a, b) => {
+      const sa = sigMap[a.key]?.label ?? "n.s.";
+      const sb = sigMap[b.key]?.label ?? "n.s.";
+      return (order[sa] ?? 4) - (order[sb] ?? 4);
+    });
+  }, [columnDefs, sigMap, sortBySig]);
+
+  const visibleClusters = useMemo(
+    () => clusters.filter((c) => selectedClusters.has(c)),
+    [clusters, selectedClusters]
+  );
+
+  const colorFn = useCallback(
+    (c) => getEffectiveClusterColor(c, clusters.indexOf(c)),
+    [getEffectiveClusterColor, clusters]
+  );
+
+  if (!metadataData) return null;
+
+  return (
+    <div style={{ padding: "16px 20px", overflowY: "auto", height: "100%" }}>
+      {/* Controls */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: fetchError ? "#f85149" : "#8b949e" }}>
+          {loadingFull ? "Loading full metadata…" : fetchError ? `Error: ${fetchError}` : enrichedRows ? `${enrichedRows.length} sensors · ${sortedCols.length} columns` : ""}
+        </span>
+        <button
+          onClick={() => setNormalize((v) => !v)}
+          style={{ fontSize: 10, padding: "3px 10px", borderRadius: 4, border: `1px solid ${normalize ? "#457B9D" : "#3d4555"}`, background: normalize ? "#457B9D22" : "transparent", color: normalize ? "#4CC9F0" : "#8b949e", cursor: "pointer" }}
+        >
+          % Normalize
+        </button>
+        <button
+          onClick={() => setSortBySig((v) => !v)}
+          style={{ fontSize: 10, padding: "3px 10px", borderRadius: 4, border: `1px solid ${sortBySig ? "#2a9d8f" : "#3d4555"}`, background: sortBySig ? "#2a9d8f22" : "transparent", color: sortBySig ? "#2a9d8f" : "#8b949e", cursor: "pointer" }}
+        >
+          Sort by significance
+        </button>
+        {/* Cluster legend */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
+          {visibleClusters.map((c) => (
+            <span key={c} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#c9d1d9" }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: colorFn(c), display: "inline-block" }} />
+              C{c}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {!enrichedRows && !loadingFull && (
+        <p style={{ color: "#8b949e", fontSize: 12 }}>No data loaded.</p>
+      )}
+
+      {/* Card grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
+        {sortedCols.map(({ key, type }) => (
+          <MetaCard
+            key={`${key}-${selectedK}`}
+            colKey={key}
+            type={type}
+            rows={enrichedRows}
+            selectedK={selectedK}
+            clusters={visibleClusters}
+            allClusters={clusters}
+            normalize={normalize}
+            sig={sigMap[key]}
+            colorFn={colorFn}
+          />
+        ))}
+      </div>
+
+      {/* Building cluster affinity panel */}
+      <BuildingClusterPanel
+        enrichedRows={enrichedRows}
+        selectedK={selectedK}
+        clusters={clusters}
+        colorFn={colorFn}
+        onNavigateToBuilding={onNavigateToBuilding}
+      />
+    </div>
+  );
+}
+
+function MetaCard({ colKey, type, rows, selectedK, clusters, normalize, sig, colorFn }) {
+  const barRef = useRef(null);
+  const kdeRef = useRef(null);
+  const boxRef = useRef(null);
+  const isContinuous = type === "continuous";
+
+  useEffect(() => {
+    if (!rows?.length || !clusters?.length) return;
+    // Double-rAF: first ensures layout pass, second ensures paint pass with correct clientWidth/clientHeight
+    let outer, inner;
+    outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => {
+        try {
+          if (isContinuous) {
+            renderMetaKDE(kdeRef.current, rows, colKey, selectedK, clusters, colorFn);
+            renderMetaBoxPlots(boxRef.current, rows, colKey, selectedK, clusters, colorFn);
+          } else {
+            renderMetaStackedBars(barRef.current, rows, colKey, selectedK, clusters, normalize, colorFn);
+          }
+        } catch (e) { console.warn("MetaCard render error", colKey, e); }
+      });
+    });
+    return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
+  }, [rows, colKey, selectedK, clusters, normalize, colorFn, isContinuous]);
+
+  const canvasStyle = { width: "100%", display: "block", borderRadius: 4 };
+
+  return (
+    <div style={{ background: "#1d2232", border: "1px solid #2e3440", borderRadius: 8, padding: "10px 12px", overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span style={{ fontSize: 10, color: "#8b949e", fontFamily: "system-ui, sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "75%" }} title={colKey}>
+          {colKey}
+        </span>
+        {sig && (
+          <span style={{ fontSize: 9, color: sig.color, fontFamily: "system-ui, sans-serif", flexShrink: 0 }}>
+            {sig.label}
+          </span>
+        )}
+      </div>
+      {isContinuous ? (
+        <>
+          <canvas ref={kdeRef} style={{ ...canvasStyle, height: "110px" }} />
+          <canvas ref={boxRef} style={{ ...canvasStyle, height: "90px", marginTop: 4 }} />
+        </>
+      ) : (
+        <canvas ref={barRef} style={{ ...canvasStyle, height: "160px" }} />
+      )}
+    </div>
+  );
+}
 
 // ─── Cluster Profiles ────────────────────────────────────────────
 function ClusterProfiles({ selectedK, clusters, selectedClusters, clusterGroups = [], getEffectiveClusterColor = getClusterColor, customColMapping = null }) {
@@ -1218,7 +1891,7 @@ function renderYearDensity(canvas, yearByCluster, clusters, viewClusterIds, colo
 }
 
 // ─── Map View ────────────────────────────────────────────────────
-function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol, clusterGroups = [], getEffectiveClusterColor = getClusterColor, customClusterCols = {} }) {
+function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorIdCol, clusterGroups = [], getEffectiveClusterColor = getClusterColor, customClusterCols = {}, navigateToBuilding = null }) {
   const deckContainerRef = useRef();
   const mapRef = useRef();
   const boxOverlayRef = useRef();
@@ -1254,7 +1927,9 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [showSunArc, setShowSunArc] = useState(false);
   const [showOutdoorOverlay, setShowOutdoorOverlay] = useState(false);
   const [xZoom, setXZoom] = useState(null); // { lo, hi } index range, or null = full range
+  const [tallPlots, setTallPlots] = useState(false);
   const brushRef = useRef(null);
+  const [brushOverlay, setBrushOverlay] = useState(null); // { startFrac, curFrac } while dragging
   const [wideMap, setWideMap] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1); // steps per second
@@ -1296,11 +1971,67 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         })
       : fetch(`${API}/api/cluster-profiles?${new URLSearchParams({ cluster_col: selectedK })}`, { signal: controller.signal });
     req
-      .then((r) => r.json())
-      .then(setAllClusterProfiles)
+      .then((r) => { if (r.ok) return r.json(); throw new Error(`HTTP ${r.status}`); })
+      .then((d) => { if (d?.timestamps) setAllClusterProfiles(d); })
       .catch(() => {});
     return () => controller.abort();
   }, [selectedK, customClusterCols]);
+
+  // Shadow refs so the selectedK-change effect can read current prop values without
+  // those props being in its dependency array (avoids spurious re-runs).
+  const metadataRef = useRef(metadataData);
+  useEffect(() => { metadataRef.current = metadataData; }, [metadataData]);
+  const sensorIdColRef = useRef(sensorIdCol);
+  useEffect(() => { sensorIdColRef.current = sensorIdCol; }, [sensorIdCol]);
+  const customClusterColsRef = useRef(customClusterCols);
+  useEffect(() => { customClusterColsRef.current = customClusterCols; }, [customClusterCols]);
+
+  // Cross-tab navigation from Metadata Statistics: fly to the building location.
+  // The user then clicks the building on the map to select it and load data.
+  useEffect(() => {
+    if (!navigateToBuilding) return;
+    const { lat, lon } = navigateToBuilding;
+    if (lat != null && lon != null) {
+      setViewState((vs) => ({
+        ...vs, latitude: lat, longitude: lon, zoom: 17, pitch: 60,
+        transitionDuration: 1500, transitionInterpolator: new FlyToInterpolator(),
+      }));
+    }
+  }, [navigateToBuilding]);
+
+  // When the cluster assignment column changes, refresh cluster values in-place so
+  // building selection and time-series data are preserved — no need to re-run Analyse View.
+  const prevSelectedKRef = useRef(selectedK);
+  useEffect(() => {
+    if (prevSelectedKRef.current === selectedK) return;
+    prevSelectedKRef.current = selectedK;
+    setXZoom(null);
+    setSunTimeIdx(null);
+    // allClusterProfiles re-fetches via its own effect; don't null it here
+    // so the building chart stays visible while new profiles load
+
+    // Re-map cluster IDs in analysedSensors to the new column
+    const meta = metadataRef.current;
+    const idCol = sensorIdColRef.current;
+    if (meta && idCol) {
+      const clusterMap = {};
+      meta.forEach((r) => { clusterMap[r[idCol]] = r[selectedK] ?? null; });
+      setAnalysedSensors((prev) =>
+        prev?.map((s) => ({ ...s, cluster: clusterMap[s.id] ?? null })) ?? null
+      );
+    }
+
+    // For custom cluster cols, add the new column to sensorProperties if not already there
+    const customMap = customClusterColsRef.current?.[selectedK];
+    if (customMap) {
+      setSensorProperties((prev) => {
+        if (!prev?.length) return prev;
+        // Skip if column already present (avoids re-triggering buildingTimeseries fetch)
+        if (selectedK in prev[0]) return prev;
+        return prev.map((s) => ({ ...s, [selectedK]: customMap[s.sensor_id] ?? null }));
+      });
+    }
+  }, [selectedK]);
 
   // ── Filters ──
   const [filterOptions, setFilterOptions] = useState(null);
@@ -1838,7 +2569,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   // Shared brush handlers — drag on any chart to zoom the time axis
   const onChartMouseDown = useCallback((e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    brushRef.current = { startFrac: (e.clientX - rect.left) / rect.width };
+    const startFrac = (e.clientX - rect.left) / rect.width;
+    brushRef.current = { startFrac };
+    setBrushOverlay({ startFrac, curFrac: startFrac });
+  }, []);
+
+  const onChartMouseMove = useCallback((e) => {
+    if (!brushRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const curFrac = (e.clientX - rect.left) / rect.width;
+    setBrushOverlay({ startFrac: brushRef.current.startFrac, curFrac });
   }, []);
 
   const onChartMouseUp = useCallback((e) => {
@@ -1847,6 +2587,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     const endFrac = (e.clientX - rect.left) / rect.width;
     const startFrac = brushRef.current.startFrac;
     brushRef.current = null;
+    setBrushOverlay(null);
     // Ignore tiny drags (clicks)
     if (Math.abs(endFrac - startFrac) < 0.01) return;
     const n = allClusterProfiles?.timestamps?.length ?? 1;
@@ -1864,6 +2605,32 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (hi - lo < 2) return;
     setXZoom({ lo, hi });
   }, [allClusterProfiles, xZoom]);
+
+  const zoomIn = useCallback(() => {
+    const n = allClusterProfiles?.timestamps?.length ?? 1;
+    const center = sunTimeIdx ?? Math.floor(n / 2);
+    const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
+    const half = Math.max(1, Math.floor((hi - lo) / 4));
+    setXZoom({ lo: Math.max(0, center - half), hi: Math.min(n - 1, center + half) });
+  }, [allClusterProfiles, xZoom, sunTimeIdx]);
+
+  const zoomOut = useCallback(() => {
+    const n = allClusterProfiles?.timestamps?.length ?? 1;
+    if (!xZoom) return;
+    const center = sunTimeIdx ?? Math.floor((xZoom.lo + xZoom.hi) / 2);
+    const half = xZoom.hi - xZoom.lo;
+    const lo = Math.max(0, center - half), hi = Math.min(n - 1, center + half);
+    setXZoom(lo <= 0 && hi >= n - 1 ? null : { lo, hi });
+  }, [allClusterProfiles, xZoom, sunTimeIdx]);
+
+  const dateToIdx = useCallback((dateStr) => {
+    const ts = allClusterProfiles?.timestamps;
+    if (!ts?.length) return 0;
+    const ms = new Date(dateStr).getTime();
+    let best = 0, bestDiff = Infinity;
+    ts.forEach((t, i) => { const d = Math.abs(new Date(t).getTime() - ms); if (d < bestDiff) { bestDiff = d; best = i; } });
+    return best;
+  }, [allClusterProfiles]);
 
   const displaySensors = analysedSensors ?? [];
   const byCluster = useMemo(() => {
@@ -1908,9 +2675,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     const yScale = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([margin.top + ph, margin.top]);
     ctx.strokeStyle = "#252c3d"; ctx.lineWidth = 1;
     yScale.ticks(5).forEach((t) => { ctx.beginPath(); ctx.moveTo(margin.left, yScale(t)); ctx.lineTo(margin.left + pw, yScale(t)); ctx.stroke(); });
-    ctx.fillStyle = "#667"; ctx.font = "10px monospace"; ctx.textAlign = "right";
-    yScale.ticks(5).forEach((t) => ctx.fillText(t.toFixed(1), margin.left - 6, yScale(t) + 3));
-    ctx.textAlign = "center";
+    // Tick marks on left axis edge
+    ctx.strokeStyle = "#66779966"; ctx.lineWidth = 1;
+    yScale.ticks(5).forEach((t) => { ctx.beginPath(); ctx.moveTo(margin.left - 4, yScale(t)); ctx.lineTo(margin.left, yScale(t)); ctx.stroke(); });
+    ctx.fillStyle = "#8899bb"; ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "right";
+    yScale.ticks(5).forEach((t) => ctx.fillText(t.toFixed(1), margin.left - 7, yScale(t) + 3.5));
+    ctx.fillStyle = "#556677"; ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "center";
     const step = Math.max(1, Math.floor((hi - lo + 1) / 6));
     for (let i = lo; i <= hi; i += step) ctx.fillText(String(timestamps[i]).slice(0, 10), xScale(i), margin.top + ph + 16);
     drawFn(ctx, xScale, yScale, lo, hi, { margin, pw, ph });
@@ -2028,7 +2798,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   useEffect(() => {
     if (analysisTab !== "profiles") return;
     if (!allClusterProfiles || !analysedSensors || !canvasRef.current) return;
-    const ts = allClusterProfiles.timestamps; if (!ts.length) return;
+    const ts = allClusterProfiles.timestamps; if (!ts?.length) return;
     const viewProfiles = Object.fromEntries(
       Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
     );
@@ -2064,7 +2834,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (analysisTab !== "profiles") return;
     const activeSensorData = buildingTimeseries || mapSensorData;
     if (!allClusterProfiles || !activeSensorData || !sensorCanvasRef.current) return;
-    const ts = allClusterProfiles.timestamps; if (!ts.length) return;
+    const ts = allClusterProfiles.timestamps; if (!ts?.length) return;
     const viewProfiles = Object.fromEntries(
       Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
     );
@@ -2234,11 +3004,53 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
               🌡 Outdoor temp
             </button>
           )}
-          {xZoom && (
-            <button onClick={() => setXZoom(null)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#E9C46A", color: "#E9C46A", background: "#E9C46A22" }}>
-              ✕ Reset zoom
+          {analysedSensors && (
+            <button onClick={() => setTallPlots(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: tallPlots ? "#58a6ff" : "#3d4555", color: tallPlots ? "#58a6ff" : "#8b949e", background: tallPlots ? "#58a6ff22" : "none" }}>
+              ⇕ Tall plots
             </button>
           )}
+          {analysedSensors && (
+            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <button onClick={zoomIn} title="Zoom in (2×, centered on playhead)" style={{ ...styles.miniBtn, padding: "4px 9px", fontSize: 13 }}>+</button>
+              <button onClick={zoomOut} disabled={!xZoom} title="Zoom out (2×)" style={{ ...styles.miniBtn, padding: "4px 9px", fontSize: 13, opacity: xZoom ? 1 : 0.4 }}>−</button>
+              {xZoom && <button onClick={() => setXZoom(null)} title="Reset zoom" style={{ ...styles.miniBtn, padding: "4px 8px", fontSize: 11, borderColor: "#E9C46A", color: "#E9C46A", background: "#E9C46A22" }}>✕</button>}
+            </span>
+          )}
+          {analysedSensors && allClusterProfiles?.timestamps?.length > 0 && (() => {
+            const ts = allClusterProfiles.timestamps;
+            const n = ts.length;
+            const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
+            const inputStyle = { background: "#1a1f2e", border: "1px solid #3d4555", borderRadius: 4, color: "#c9d1d9", fontSize: 10, padding: "2px 4px", colorScheme: "dark", cursor: "pointer" };
+            return (
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <input type="date"
+                  value={ts[lo]?.slice(0, 10) ?? ""}
+                  min={ts[0]?.slice(0, 10)}
+                  max={ts[hi - 1]?.slice(0, 10)}
+                  style={inputStyle}
+                  onChange={(e) => {
+                    const idx = dateToIdx(e.target.value);
+                    const newHi = xZoom?.hi ?? (n - 1);
+                    const newLo = Math.min(idx, newHi - 1);
+                    setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi });
+                  }}
+                />
+                <span style={{ color: "#556677", fontSize: 10 }}>–</span>
+                <input type="date"
+                  value={ts[hi]?.slice(0, 10) ?? ""}
+                  min={ts[lo + 1]?.slice(0, 10)}
+                  max={ts[n - 1]?.slice(0, 10)}
+                  style={inputStyle}
+                  onChange={(e) => {
+                    const idx = dateToIdx(e.target.value);
+                    const newLo = xZoom?.lo ?? 0;
+                    const newHi = Math.max(idx, newLo + 1);
+                    setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi });
+                  }}
+                />
+              </span>
+            );
+          })()}
           <button onClick={toggle3D} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: mode3D ? "#E9C46A" : "#3d4555", color: mode3D ? "#E9C46A" : "#8b949e", background: mode3D ? "#E9C46A22" : "none" }}>
             ⬡ 3D{Object.keys(pointHeights).length === 0 ? " (loading…)" : ""}
           </button>
@@ -2359,6 +3171,46 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             effects={mode3D ? [lightingEffect] : []}
             onViewStateChange={handleViewStateChange}
             glOptions={{ webgl2: true }}
+            getCursor={({ isHovering }) => isHovering ? "pointer" : "grab"}
+            onClick={(info) => {
+              if (!info.object?.id) return;
+              const sensorId = info.object.id;
+              const snapshotVisible = visibleSensors.map((d) => d.id).slice(0, 200);
+
+              const selectBuilding = (bid) => {
+                setSelectedBuildings(new Set([bid]));
+                setBuildingTimeseries(null);
+                setAnalysisTab("profiles");
+                if (!snapshotVisible.length) return;
+                fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(snapshotVisible.join(","))}`)
+                  .then((r) => r.json())
+                  .then(setBuildingTimeseries)
+                  .catch(() => {});
+              };
+
+              // 1. Fast path: lm_building_id already in the 500-sensor sample
+              const cached = sensorPropLookup[sensorId]?.["lm_building_id"];
+              if (cached) { selectBuilding(cached); return; }
+
+              // 2. Sensor not in sample — fetch its individual properties (single-row DB lookup)
+              fetch(`${API}/api/sensor-properties?sensor_id=${encodeURIComponent(sensorId)}`)
+                .then((r) => r.json())
+                .then((props) => {
+                  let bid = props?.["lm_building_id"];
+                  // 3. Still null — spatial fallback: building with most visible sensors in areaGroups
+                  if (!bid) {
+                    const visibleSet = new Set(snapshotVisible);
+                    let bestCount = 0;
+                    Object.entries(areaGroups).forEach(([buildingId, sensors]) => {
+                      if (buildingId === "Unknown") return;
+                      const overlap = sensors.filter((s) => visibleSet.has(s.sensor_id)).length;
+                      if (overlap > bestCount) { bestCount = overlap; bid = buildingId; }
+                    });
+                  }
+                  selectBuilding(bid ?? sensorId);
+                })
+                .catch(() => selectBuilding(sensorId));
+            }}
             getTooltip={({ object }) => {
               if (!object) return null;
               const props = sensorPropLookup[object.id];
@@ -2496,9 +3348,18 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
           <>
             {/* Summary */}
             <p style={{ ...styles.mapInfo, margin: 0 }}>
-              {displaySensors.length.toLocaleString()} sensors
-              {sensorProperties && ` · ${Object.keys(areaGroups).length} buildings`}
-              {` · ${viewClusterIds.size} clusters`}
+              {selectedBuildings.size > 0 && activeSensorProperties
+                ? <>
+                    <span style={{ color: "#58a6ff" }}>{activeSensorProperties.length.toLocaleString()} sensors</span>
+                    {` · ${selectedBuildings.size} building${selectedBuildings.size > 1 ? "s" : ""} selected`}
+                    {` · ${Object.keys(activeByCluster).filter(k => activeByCluster[k] > 0).length} clusters`}
+                  </>
+                : <>
+                    {displaySensors.length.toLocaleString()} sensors
+                    {sensorProperties && ` · ${Object.keys(areaGroups).length} buildings`}
+                    {` · ${viewClusterIds.size} clusters`}
+                  </>
+              }
             </p>
 
             {/* Cluster breakdown bars */}
@@ -2555,7 +3416,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                   <>
                     <p style={{ ...styles.mapInfo, marginBottom: 0 }}>Full cluster means — {viewClusterIds.size} cluster{viewClusterIds.size > 1 ? "s" : ""} in view</p>
                     <div style={{ position: "relative" }}>
-                      <canvas ref={canvasRef} style={{ ...styles.canvas, height: showOutdoorOverlay ? 240 : 200 }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp} />
+                      <canvas ref={canvasRef} style={{ ...styles.canvas, height: tallPlots ? 420 : (showOutdoorOverlay ? 240 : 200) }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }} />
+                      {brushOverlay && (() => {
+                        const l = Math.min(brushOverlay.startFrac, brushOverlay.curFrac) * 100;
+                        const w = Math.abs(brushOverlay.curFrac - brushOverlay.startFrac) * 100;
+                        return <div style={{ position: "absolute", top: 0, bottom: 0, left: `${l}%`, width: `${w}%`, background: "rgba(233,196,106,0.12)", borderLeft: "1px solid rgba(233,196,106,0.5)", borderRight: "1px solid rgba(233,196,106,0.5)", pointerEvents: "none", zIndex: 3 }} />;
+                      })()}
                       {sunTimeIdx !== null && canvasRef.current && (() => {
                         const n = allClusterProfiles.timestamps.length;
                         const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (canvasRef.current.clientWidth - 72);
@@ -2573,7 +3439,12 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                       } + cluster means
                     </p>
                     <div style={{ position: "relative" }}>
-                      <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: showOutdoorOverlay ? 240 : 200 }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp} />
+                      <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: tallPlots ? 420 : (showOutdoorOverlay ? 240 : 200) }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }} />
+                      {brushOverlay && (() => {
+                        const l = Math.min(brushOverlay.startFrac, brushOverlay.curFrac) * 100;
+                        const w = Math.abs(brushOverlay.curFrac - brushOverlay.startFrac) * 100;
+                        return <div style={{ position: "absolute", top: 0, bottom: 0, left: `${l}%`, width: `${w}%`, background: "rgba(233,196,106,0.12)", borderLeft: "1px solid rgba(233,196,106,0.5)", borderRight: "1px solid rgba(233,196,106,0.5)", pointerEvents: "none", zIndex: 3 }} />;
+                      })()}
                       {sunTimeIdx !== null && sensorCanvasRef.current && (() => {
                         const n = allClusterProfiles.timestamps.length;
                         const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (sensorCanvasRef.current.clientWidth - 72);
@@ -2617,9 +3488,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                       return (
                         <>
                           <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Outdoor temperature &amp; relative humidity — SMHI station</p>
-                          <div ref={outdoorChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp}>
+                          <div ref={outdoorChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }}>
+                            {brushOverlay && (() => { const l = Math.min(brushOverlay.startFrac, brushOverlay.curFrac)*100, w = Math.abs(brushOverlay.curFrac - brushOverlay.startFrac)*100; return <div style={{ position:"absolute", top:0, bottom:0, left:`${l}%`, width:`${w}%`, background:"rgba(233,196,106,0.12)", borderLeft:"1px solid rgba(233,196,106,0.5)", borderRight:"1px solid rgba(233,196,106,0.5)", pointerEvents:"none", zIndex:3 }} />; })()}
                             <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
-                              style={{ width: "100%", height: 120, display: "block", background: "#1a1f2e" }}>
+                              style={{ width: "100%", height: tallPlots ? 220 : 120, display: "block", background: "#1a1f2e" }}>
                               {/* RH area (background) */}
                               {rhs.length > 0 && (() => {
                                 const area = `M ${sx(0).toFixed(1)},${syRH(sliced[0].rh ?? 0).toFixed(1)} ` +
@@ -2641,7 +3513,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                               {rhTicks.map((v) => (
                                 <g key={`rh${v}`}>
                                   <line x1={ML} y1={syRH(v)} x2={ML+pw} y2={syRH(v)} stroke="#1e2535" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-                                  <text x={VW - MR + 6} y={syRH(v)+4} textAnchor="start" fontSize="14" fill="#4fc3f799" fontFamily="monospace">{v}</text>
+                                  <line x1={ML+pw} y1={syRH(v)} x2={ML+pw+4} y2={syRH(v)} stroke="#4fc3f766" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                                  <text x={VW - MR + 9} y={syRH(v)+3.5} textAnchor="start" fontSize="10" fill="#4fc3f7aa" fontFamily="system-ui, sans-serif">{v}</text>
                                 </g>
                               ))}
                               {/* RH line */}
@@ -2650,16 +3523,15 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                               {tTicks.map((v) => (
                                 <g key={`t${v}`}>
                                   <line x1={ML} y1={syT(v)} x2={ML+pw} y2={syT(v)} stroke="#252c3d" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-                                  <text x={ML-6} y={syT(v)+4} textAnchor="end" fontSize="14" fill="#ff8a6599" fontFamily="monospace">{v}</text>
+                                  <line x1={ML-4} y1={syT(v)} x2={ML} y2={syT(v)} stroke="#ff8a6566" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                                  <text x={ML-8} y={syT(v)+3.5} textAnchor="end" fontSize="10" fill="#ff8a65aa" fontFamily="system-ui, sans-serif">{v}</text>
                                 </g>
                               ))}
                               {/* Temperature line */}
                               {temps.length > 0 && <path d={tempPath} fill="none" stroke="#ff8a65" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />}
-                              {/* Axis labels */}
-                              <text x={ML-38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#ff8a6566" fontFamily="monospace"
-                                transform={`rotate(-90,${ML-38},${MT+ph/2})`}>°C</text>
-                              <text x={VW-MR+38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#4fc3f766" fontFamily="monospace"
-                                transform={`rotate(90,${VW-MR+38},${MT+ph/2})`}>RH%</text>
+                              {/* Axis unit labels — top of each axis */}
+                              <text x={ML-8} y={MT-3} textAnchor="end" fontSize="9" fill="#ff8a6588" fontFamily="system-ui, sans-serif">°C</text>
+                              <text x={VW-MR+9} y={MT-3} textAnchor="start" fontSize="9" fill="#4fc3f788" fontFamily="system-ui, sans-serif">RH%</text>
                             </svg>
                             {/* playhead */}
                             {sunTimeIdx !== null && outdoorChartRef.current && sunTimeIdx >= lo && sunTimeIdx <= hi && (() => {
@@ -2694,9 +3566,10 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                       return (
                         <>
                           <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>Solar irradiance — SMHI STRÅNG</p>
-                          <div ref={irradianceChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseUp={onChartMouseUp}>
+                          <div ref={irradianceChartRef} style={{ position: "relative", borderRadius: 8, border: "1px solid #2e3440", overflow: "hidden", cursor: "col-resize" }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }}>
+                            {brushOverlay && (() => { const l = Math.min(brushOverlay.startFrac, brushOverlay.curFrac)*100, w = Math.abs(brushOverlay.curFrac - brushOverlay.startFrac)*100; return <div style={{ position:"absolute", top:0, bottom:0, left:`${l}%`, width:`${w}%`, background:"rgba(233,196,106,0.12)", borderLeft:"1px solid rgba(233,196,106,0.5)", borderRight:"1px solid rgba(233,196,106,0.5)", pointerEvents:"none", zIndex:3 }} />; })()}
                             <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
-                              style={{ width: "100%", height: 120, display: "block", background: "#1a1f2e" }}>
+                              style={{ width: "100%", height: tallPlots ? 220 : 120, display: "block", background: "#1a1f2e" }}>
                               <defs>
                                 <linearGradient id="irr-grad" x1="0" y1="0" x2="0" y2="1">
                                   <stop offset="0%" stopColor="#F0B828" stopOpacity="0.7" />
@@ -2707,16 +3580,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                               {ticks.map((v) => (
                                 <g key={v}>
                                   <line x1={ML} y1={sy(v)} x2={ML+pw} y2={sy(v)} stroke="#252c3d" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-                                  <text x={ML-6} y={sy(v)+3} textAnchor="end" fontSize="14" fill="#667799" fontFamily="monospace">{v}</text>
+                                  <line x1={ML-4} y1={sy(v)} x2={ML} y2={sy(v)} stroke="#66779966" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                                  <text x={ML-8} y={sy(v)+3.5} textAnchor="end" fontSize="10" fill="#8899bb" fontFamily="system-ui, sans-serif">{v}</text>
                                 </g>
                               ))}
                               {/* area */}
                               <path d={area} fill="url(#irr-grad)" />
                               {/* line */}
                               <polyline points={pts} fill="none" stroke="#F0B828" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
-                              {/* W/m² axis label */}
-                              <text x={ML-38} y={MT + ph/2 + 5} textAnchor="middle" fontSize="12" fill="#556" fontFamily="monospace"
-                                transform={`rotate(-90,${ML-38},${MT+ph/2})`}>W/m²</text>
+                              {/* W/m² axis unit label — top of axis */}
+                              <text x={ML-8} y={MT-3} textAnchor="end" fontSize="9" fill="#66779988" fontFamily="system-ui, sans-serif">W/m²</text>
                             </svg>
                             {/* playhead */}
                             {sunTimeIdx !== null && irradianceChartRef.current && sunTimeIdx >= lo && sunTimeIdx <= hi && (() => {
