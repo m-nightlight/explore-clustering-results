@@ -1955,6 +1955,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [buildingSearch, setBuildingSearch] = useState("");
   const canvasRef = useRef();
   const sensorCanvasRef = useRef();
+  const outdoorSensorsCanvasRef = useRef();
   const irradianceChartRef = useRef(); // wrapper div for playhead x-position calc
   const floorCanvasRef = useRef();
   const yearCanvasRef = useRef();
@@ -2389,6 +2390,43 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
 
     return ls;
   }, [showSunArc, mode3D, sunTimestampMs, sunInfo, viewState.latitude, viewState.longitude]);
+
+  // Current-timestamp heatmap weights for outdoor sensors
+  const heatmapPoints = useMemo(() => {
+    if (!showHeatmap || !outdoorSensors?.length || !outdoorTimeseries?.timestamps?.length || sunTimeIdx === null || !allClusterProfiles?.timestamps) return null;
+    const sunMs = new Date(allClusterProfiles.timestamps[sunTimeIdx]).getTime();
+    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
+    let bestIdx = 0, bestDiff = Infinity;
+    odTms.forEach((t, i) => { const d = Math.abs(t - sunMs); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
+    return outdoorSensors.flatMap((s) => {
+      const temp = outdoorTimeseries.sensors[s.sensor_id]?.[bestIdx];
+      return temp != null ? [{ position: [s.lon, s.lat], weight: temp }] : [];
+    });
+  }, [showHeatmap, outdoorSensors, outdoorTimeseries, sunTimeIdx, allClusterProfiles]);
+
+  // Per-sensor arrays aligned to the indoor timeseries axis (for the outdoor sensors chart)
+  const outdoorSensorsAligned = useMemo(() => {
+    if (!allClusterProfiles?.timestamps?.length || !outdoorTimeseries?.timestamps?.length) return null;
+    const ts = allClusterProfiles.timestamps;
+    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
+    const sensorIds = Object.keys(outdoorTimeseries.sensors);
+    // Pre-build index mapping: for each indoor ts, find nearest outdoor ts index
+    const idxMap = ts.map((t) => {
+      const ms = new Date(t).getTime();
+      let best = 0, bestDiff = Infinity;
+      odTms.forEach((ot, j) => { const d = Math.abs(ot - ms); if (d < bestDiff) { bestDiff = d; best = j; } });
+      return best;
+    });
+    const sensors = {};
+    sensorIds.forEach((id) => {
+      sensors[id] = idxMap.map((j) => outdoorTimeseries.sensors[id]?.[j] ?? null);
+    });
+    const mean = ts.map((_, i) => {
+      const vals = sensorIds.map((id) => sensors[id][i]).filter((v) => v != null);
+      return vals.length > 0 ? d3.mean(vals) : null;
+    });
+    return { sensors, mean, sensorIds };
+  }, [allClusterProfiles, outdoorTimeseries]);
 
   // ── deck.gl layers ──
   const layers = useMemo(() => {
@@ -2829,33 +2867,6 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     return allClusterProfiles.timestamps.map((t) => getIrradiance(new Date(t).getTime(), strangData) ?? 0);
   }, [allClusterProfiles, strangData]);
 
-  // Current-timestamp heatmap weights for outdoor sensors
-  const heatmapPoints = useMemo(() => {
-    if (!showHeatmap || !outdoorSensors?.length || !outdoorTimeseries?.timestamps?.length || sunTimeIdx === null || !allClusterProfiles?.timestamps) return null;
-    const sunMs = new Date(allClusterProfiles.timestamps[sunTimeIdx]).getTime();
-    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
-    let bestIdx = 0, bestDiff = Infinity;
-    odTms.forEach((t, i) => { const d = Math.abs(t - sunMs); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
-    return outdoorSensors.flatMap((s) => {
-      const temp = outdoorTimeseries.sensors[s.sensor_id]?.[bestIdx];
-      return temp != null ? [{ position: [s.lon, s.lat], weight: temp }] : [];
-    });
-  }, [showHeatmap, outdoorSensors, outdoorTimeseries, sunTimeIdx, allClusterProfiles]);
-
-  // Mean of all outdoor sensors aligned to the indoor timeseries axis (for chart overlay)
-  const outdoorSensorMeanVals = useMemo(() => {
-    if (!showOutdoorSensors || !allClusterProfiles?.timestamps?.length || !outdoorTimeseries?.timestamps?.length) return null;
-    const odTms = outdoorTimeseries.timestamps.map((t) => new Date(t).getTime());
-    const sensorIds = Object.keys(outdoorTimeseries.sensors);
-    return allClusterProfiles.timestamps.map((ts) => {
-      const ms = new Date(ts).getTime();
-      let bestIdx = 0, bestDiff = Infinity;
-      odTms.forEach((t, i) => { const d = Math.abs(t - ms); if (d < bestDiff) { bestDiff = d; bestIdx = i; } });
-      const vals = sensorIds.map((id) => outdoorTimeseries.sensors[id]?.[bestIdx]).filter((v) => v != null);
-      return vals.length > 0 ? d3.mean(vals) : null;
-    });
-  }, [showOutdoorSensors, allClusterProfiles, outdoorTimeseries]);
-
   // ── Outdoor climate values aligned to sensor timestamps ──
   const outdoorClimateVals = useMemo(() => {
     if (!allClusterProfiles?.timestamps?.length || !outdoorClimate?.timestamps?.length) return null;
@@ -2913,23 +2924,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
         }
         ctx.stroke(); ctx.setLineDash([]);
       }
-      if (showOutdoorSensors && outdoorSensorMeanVals) {
-        ctx.beginPath();
-        ctx.setLineDash([6, 3]);
-        ctx.strokeStyle = "#ff8c00";
-        ctx.lineWidth = 1.5;
-        let startedOd = false;
-        for (let i = lo; i <= hi; i++) {
-          const v = outdoorSensorMeanVals[i];
-          if (v == null) { startedOd = false; continue; }
-          if (!startedOd) { ctx.moveTo(xScale(i), yScale(v)); startedOd = true; }
-          else ctx.lineTo(xScale(i), yScale(v));
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
     }, xZoom);
-  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor, xZoom, showOutdoorOverlay, outdoorClimateVals, showOutdoorSensors, outdoorSensorMeanVals]);
+  }, [allClusterProfiles, analysedSensors, viewClusterIds, clusters, drawChart, analysisTab, getEffectiveClusterColor, xZoom, showOutdoorOverlay, outdoorClimateVals]);
 
   useEffect(() => {
     if (analysisTab !== "profiles") return;
@@ -2966,6 +2962,65 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       });
     }, xZoom);
   }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor, xZoom]);
+
+  // ── Outdoor sensors chart ──
+  useEffect(() => {
+    if (!showOutdoorSensors || !outdoorSensorsAligned || !outdoorSensorsCanvasRef.current) return;
+    if (!allClusterProfiles?.timestamps?.length) return;
+    const { sensors, mean, sensorIds } = outdoorSensorsAligned;
+    const smhiTemps = outdoorClimateVals ? outdoorClimateVals.map((d) => d.temp) : [];
+    const allVals = [...mean, ...smhiTemps].filter((v) => v != null);
+    if (!allVals.length) return;
+    drawChart(outdoorSensorsCanvasRef.current, allClusterProfiles.timestamps, allVals, (ctx, xScale, yScale, lo, hi) => {
+      // Individual sensor lines — thin, translucent
+      ctx.lineWidth = 0.7;
+      sensorIds.forEach((id) => {
+        ctx.strokeStyle = "rgba(255,140,0,0.15)";
+        ctx.beginPath();
+        let started = false;
+        for (let i = lo; i <= hi; i++) {
+          const v = sensors[id][i];
+          if (v == null) { started = false; continue; }
+          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; }
+          else ctx.lineTo(xScale(i), yScale(v));
+        }
+        ctx.stroke();
+      });
+      // Mean line — bold, solid orange
+      ctx.strokeStyle = "#ff8c00";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = lo; i <= hi; i++) {
+        const v = mean[i];
+        if (v == null) { started = false; continue; }
+        if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; }
+        else ctx.lineTo(xScale(i), yScale(v));
+      }
+      ctx.stroke();
+      // SMHI station temperature — dashed muted line, only when overlay is on
+      if (showOutdoorOverlay && outdoorClimateVals) {
+        ctx.strokeStyle = "rgba(160,185,220,0.75)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([8, 4]);
+        ctx.beginPath();
+        let startedSmhi = false;
+        for (let i = lo; i <= hi; i++) {
+          const v = outdoorClimateVals[i]?.temp;
+          if (v == null) { startedSmhi = false; continue; }
+          if (!startedSmhi) { ctx.moveTo(xScale(i), yScale(v)); startedSmhi = true; }
+          else ctx.lineTo(xScale(i), yScale(v));
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Label
+        ctx.fillStyle = "rgba(160,185,220,0.75)";
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText("SMHI station", xScale(hi) - 2, yScale(outdoorClimateVals[hi]?.temp ?? allVals[0]) - 4);
+      }
+    }, xZoom);
+  }, [showOutdoorSensors, outdoorSensorsAligned, allClusterProfiles, drawChart, xZoom, outdoorClimateVals, showOutdoorOverlay]);
 
   // ── Building timeseries fetch ──
   useEffect(() => {
@@ -3566,6 +3621,30 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         );
                       })()}
                     </div>
+                    {showOutdoorSensors && outdoorSensorsAligned && (
+                      <>
+                        <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
+                          Outdoor sensors — {outdoorSensorsAligned.sensorIds.length} stations (orange), mean (bold){showOutdoorOverlay ? ", SMHI station (dashed)" : ""}
+                        </p>
+                        <div style={{ position: "relative" }}>
+                          <canvas ref={outdoorSensorsCanvasRef} style={{ ...styles.canvas, height: tallPlots ? 420 : 160 }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }} />
+                          {brushOverlay && (() => {
+                            const l = Math.min(brushOverlay.startFrac, brushOverlay.curFrac) * 100;
+                            const w = Math.abs(brushOverlay.curFrac - brushOverlay.startFrac) * 100;
+                            return <div style={{ position: "absolute", top: 0, bottom: 0, left: `${l}%`, width: `${w}%`, background: "rgba(233,196,106,0.12)", borderLeft: "1px solid rgba(233,196,106,0.5)", borderRight: "1px solid rgba(233,196,106,0.5)", pointerEvents: "none", zIndex: 3 }} />;
+                          })()}
+                          {sunTimeIdx !== null && outdoorSensorsCanvasRef.current && (() => {
+                            const n = allClusterProfiles.timestamps.length;
+                            const x = 52 + (sunTimeIdx / Math.max(1, n - 1)) * (outdoorSensorsCanvasRef.current.clientWidth - 72);
+                            return (
+                              <div style={{ position: "absolute", left: x, top: 16, bottom: 44, width: 1, background: "rgba(233,196,106,0.55)", pointerEvents: "none", zIndex: 2 }}>
+                                <div style={{ position: "absolute", top: -4, left: -4, width: 9, height: 9, borderRadius: "50%", background: "#E9C46A", boxShadow: "0 0 6px #E9C46A" }} />
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </>
+                    )}
                     {outdoorClimateVals && (() => {
                       const ML = 52, MR = 52, MT = 16, MB = 30;
                       const VW = 1000, VH = 120;
