@@ -96,20 +96,27 @@ export default function DegreeHoursMap({ metadataData }) {
 
   // Camera animation
   const [isRotating, setIsRotating]   = useState(false);
-  const [rotateSpeed, setRotateSpeed] = useState(0.3);  // °/s
+  const [rotateSpeed, setRotateSpeed] = useState(0.3);   // °/s
   const [isZooming, setIsZooming]     = useState(false);
-  const [zoomAmp, setZoomAmp]         = useState(1.0);  // zoom-level amplitude
+  const [zoomAmp, setZoomAmp]         = useState(1.0);   // zoom-level amplitude
   const [isTilting, setIsTilting]     = useState(false);
-  const [tiltAmp, setTiltAmp]         = useState(20);   // ± degrees pitch
-  const [isFlyover, setIsFlyover]     = useState(false);
-  const [flyoverRadius, setFlyoverRadius] = useState(150); // orbit radius in metres
+  const [tiltAmp, setTiltAmp]         = useState(20);    // ± degrees pitch (oscillate)
+  const [isSweeping, setIsSweeping]   = useState(false); // one-way tilt sweep
+  const [sweepTarget, setSweepTarget] = useState(5);     // target pitch (°)
+  const [sweepDuration, setSweepDuration] = useState(10000); // ms to reach target
+  const [isFlyover, setIsFlyover]       = useState(false);
+  const [flyoverSpeed, setFlyoverSpeed] = useState(30);   // m/s straight travel
+  const [isZoomIn, setIsZoomIn]         = useState(false);
+  const [zoomInFactor, setZoomInFactor] = useState(3);    // multiplier (2×, 3×, 5×, 10×)
+  const [zoomInDuration, setZoomInDuration] = useState(8000); // ms
   const animFrameRef   = useRef(null);
   const lastTimeRef    = useRef(null);
-  const elapsedRef     = useRef(0);       // ms — drives zoom & tilt sine waves
-  const zoomBaseRef    = useRef(null);    // zoom when zoom anim started
-  const pitchBaseRef   = useRef(null);    // pitch when tilt anim started
-  const orbitCenterRef = useRef(null);    // {lon, lat} fixed orbit centre
-  const orbitAngleRef  = useRef(0);       // current orbit angle in radians
+  const elapsedRef     = useRef(0);    // ms — drives zoom & tilt sine waves
+  const zoomBaseRef    = useRef(null); // zoom when zoom anim started
+  const pitchBaseRef   = useRef(null); // pitch when tilt/sweep started
+  const sweepElapsed   = useRef(0);   // ms elapsed in current sweep
+  const zoomInStart    = useRef(null); // zoom when zoom-in started
+  const zoomInElapsed  = useRef(0);   // ms elapsed in zoom-in
 
   // Outlier filter
   const [outlierActive, setOutlierActive]     = useState(false);
@@ -177,17 +184,16 @@ export default function DegreeHoursMap({ metadataData }) {
     setOutlierInput(String(suggested));
   }, [fieldCache, selectedFields]);
 
-  // Single animation loop — rotation, zoom, tilt, flyover all run in parallel
-  const isAnimating = isRotating || isZooming || isTilting || isFlyover;
+  // Single animation loop — all animations run in parallel
+  const isAnimating = isRotating || isZooming || isTilting || isSweeping || isFlyover || isZoomIn;
   useEffect(() => {
     if (!isAnimating) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       lastTimeRef.current = null;
       return;
     }
-    const ZOOM_PERIOD_MS  = 20000; // 20 s per in-out cycle
-    const TILT_PERIOD_MS  = 15000; // 15 s per tilt cycle
-    const ORBIT_PERIOD_MS = 60000; // 60 s per full orbit
+    const ZOOM_PERIOD_MS = 20000;
+    const TILT_PERIOD_MS = 15000;
     // lon/lat metres → degrees at ~57.7°N
     const LON_PER_M = 1 / 59400;
     const LAT_PER_M = 1 / 111000;
@@ -196,86 +202,99 @@ export default function DegreeHoursMap({ metadataData }) {
       if (lastTimeRef.current !== null) {
         const dt = timestamp - lastTimeRef.current;
         elapsedRef.current += dt;
+        if (isSweeping) sweepElapsed.current += dt;
+        if (isZoomIn)  zoomInElapsed.current += dt;
+
+        let sweepDone = false;
+        let zoomInDone = false;
 
         setViewState((vs) => {
           // ── Capture base values on first frame ──
-          if (isZooming   && zoomBaseRef.current  === null) zoomBaseRef.current  = vs.zoom;
-          if (isTilting   && pitchBaseRef.current  === null) pitchBaseRef.current  = vs.pitch;
-          if (isFlyover   && orbitCenterRef.current === null)
-            orbitCenterRef.current = { lon: vs.longitude, lat: vs.latitude };
+          if (isZooming  && zoomBaseRef.current  === null) zoomBaseRef.current  = vs.zoom;
+          if (isZoomIn   && zoomInStart.current  === null) zoomInStart.current  = vs.zoom;
+          if (isTilting  && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
+          if (isSweeping && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
 
           // ── Rotation ──
           const bearing = isRotating
             ? (vs.bearing + rotateSpeed * (dt / 1000)) % 360
-            : isFlyover
-              // flyover steers bearing to match direction of travel (tangent of orbit)
-              ? ((orbitAngleRef.current * 180) / Math.PI + 90 + 360) % 360
-              : vs.bearing;
+            : vs.bearing;
 
           // ── Zoom ──
-          const zoom = isZooming
-            ? (zoomBaseRef.current ?? vs.zoom) +
-              zoomAmp * Math.sin((2 * Math.PI * elapsedRef.current) / ZOOM_PERIOD_MS)
-            : vs.zoom;
+          let zoom = vs.zoom;
+          if (isZooming) {
+            zoom = (zoomBaseRef.current ?? vs.zoom) +
+              zoomAmp * Math.sin((2 * Math.PI * elapsedRef.current) / ZOOM_PERIOD_MS);
+          } else if (isZoomIn) {
+            const t = Math.min(1, zoomInElapsed.current / zoomInDuration);
+            zoom = (zoomInStart.current ?? vs.zoom) + Math.log2(zoomInFactor) * t;
+            if (t >= 1) zoomInDone = true;
+          }
 
-          // ── Tilt ──
-          const pitch = isTilting
-            ? Math.max(0, Math.min(80,
-                (pitchBaseRef.current ?? vs.pitch) +
-                tiltAmp * Math.sin((2 * Math.PI * elapsedRef.current) / TILT_PERIOD_MS)
-              ))
-            : vs.pitch;
+          // ── Tilt (oscillate) ──
+          let pitch = vs.pitch;
+          if (isTilting) {
+            pitch = Math.max(0, Math.min(80,
+              (pitchBaseRef.current ?? vs.pitch) +
+              tiltAmp * Math.sin((2 * Math.PI * elapsedRef.current) / TILT_PERIOD_MS)
+            ));
+          } else if (isSweeping) {
+            // One-way linear sweep from current pitch → sweepTarget
+            const t = Math.min(1, sweepElapsed.current / sweepDuration);
+            const start = pitchBaseRef.current ?? vs.pitch;
+            pitch = start + (sweepTarget - start) * t;
+            if (t >= 1) sweepDone = true;
+          }
 
-          // ── Flyover orbit ──
+          // ── Flyover: straight-line travel in bearing direction ──
           let longitude = vs.longitude;
           let latitude  = vs.latitude;
-          if (isFlyover && orbitCenterRef.current) {
-            const { lon: cLon, lat: cLat } = orbitCenterRef.current;
-            const dAngle = (2 * Math.PI * (dt / 1000)) / (ORBIT_PERIOD_MS / 1000);
-            orbitAngleRef.current = (orbitAngleRef.current + dAngle) % (2 * Math.PI);
-            const θ = orbitAngleRef.current;
-            longitude = cLon + flyoverRadius * LON_PER_M * Math.sin(θ);
-            latitude  = cLat + flyoverRadius * LAT_PER_M * Math.cos(θ);
+          if (isFlyover) {
+            const bearingRad = (vs.bearing * Math.PI) / 180;
+            const distMetres = flyoverSpeed * (dt / 1000);
+            longitude += distMetres * LON_PER_M * Math.sin(bearingRad);
+            latitude  += distMetres * LAT_PER_M * Math.cos(bearingRad);
           }
 
           return { ...vs, bearing, zoom, pitch, longitude, latitude };
         });
+
+        if (sweepDone) {
+          setIsSweeping(false);
+          pitchBaseRef.current = null;
+          sweepElapsed.current = 0;
+        }
+        if (zoomInDone) {
+          setIsZoomIn(false);
+          zoomInStart.current   = null;
+          zoomInElapsed.current = 0;
+        }
       }
       lastTimeRef.current = timestamp;
       animFrameRef.current = requestAnimationFrame(step);
     };
     animFrameRef.current = requestAnimationFrame(step);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [isAnimating, isRotating, isZooming, isTilting, isFlyover,
-      rotateSpeed, zoomAmp, tiltAmp, flyoverRadius]);
+  }, [isAnimating, isRotating, isZooming, isTilting, isSweeping, isFlyover, isZoomIn,
+      rotateSpeed, zoomAmp, tiltAmp, sweepTarget, sweepDuration, flyoverSpeed,
+      zoomInFactor, zoomInDuration]);
 
-  const startZoom = () => {
-    elapsedRef.current = 0;
-    zoomBaseRef.current = null;
-    setIsZooming(true);
-  };
-  const startTilt = () => {
-    elapsedRef.current = 0;
-    pitchBaseRef.current = null;
-    setIsTilting(true);
-  };
-  const startFlyover = () => {
-    orbitCenterRef.current = null; // captured from live viewState on first frame
-    orbitAngleRef.current  = 0;
-    setIsFlyover(true);
-  };
-  const stopFlyover = () => {
-    setIsFlyover(false);
-    orbitCenterRef.current = null;
-  };
+  const startZoom    = () => { elapsedRef.current = 0; zoomBaseRef.current = null; setIsZooming(true); };
+  const startZoomIn  = () => { zoomInElapsed.current = 0; zoomInStart.current = null; setIsZoomIn(true); };
+  const startTilt    = () => { elapsedRef.current = 0; pitchBaseRef.current = null; setIsTilting(true); };
+  const startSweep   = () => { sweepElapsed.current = 0; pitchBaseRef.current = null; setIsSweeping(true); };
 
   // Stop animations on manual interaction
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     if (interactionState?.isDragging || interactionState?.isRotating) setIsRotating(false);
-    if (interactionState?.isZooming) { setIsZooming(false); zoomBaseRef.current = null; }
+    if (interactionState?.isZooming) {
+      setIsZooming(false); zoomBaseRef.current = null;
+      setIsZoomIn(false);  zoomInStart.current = null; zoomInElapsed.current = 0;
+    }
     if (interactionState?.isDragging) {
-      setIsTilting(false);  pitchBaseRef.current = null;
-      setIsFlyover(false);  orbitCenterRef.current = null;
+      setIsTilting(false);
+      setIsSweeping(false); pitchBaseRef.current = null; sweepElapsed.current = 0;
+      setIsFlyover(false);
     }
     setViewState({ ...vs });
   }, []);
@@ -575,31 +594,13 @@ export default function DegreeHoursMap({ metadataData }) {
 
         {/* Camera rotation */}
         <div style={s.controlGroup}>
-          <button
-            onClick={() => setIsRotating((v) => !v)}
-            style={{
-              ...s.btn,
-              borderColor: isRotating ? "#E9C46A" : "#3d4555",
-              color:        isRotating ? "#E9C46A" : "#8b949e",
-              background:   isRotating ? "#E9C46A22" : "none",
-            }}
-            title="Rotate camera continuously"
-          >
+          <button onClick={() => setIsRotating((v) => !v)}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isRotating ? "#E9C46A" : "#3d4555", color: isRotating ? "#E9C46A" : "#8b949e", background: isRotating ? "#E9C46A22" : "none" }}
+            title="Rotate camera continuously">
             {isRotating ? "⏸ Rotate" : "↻ Rotate"}
           </button>
           {[0.1, 0.3, 1, 3].map((spd) => (
-            <button
-              key={spd}
-              onClick={() => setRotateSpeed(spd)}
-              style={{
-                ...s.btn,
-                padding: "2px 6px",
-                fontSize: 10,
-                borderColor: rotateSpeed === spd ? "#E9C46A" : "#3d4555",
-                color:        rotateSpeed === spd ? "#E9C46A" : "#8b949e",
-                background:   rotateSpeed === spd ? "#E9C46A22" : "none",
-              }}
-            >
+            <button key={spd} onClick={() => setRotateSpeed(spd)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: rotateSpeed === spd ? "#E9C46A" : "#3d4555", color: rotateSpeed === spd ? "#E9C46A" : "#8b949e", background: rotateSpeed === spd ? "#E9C46A22" : "none" }}>
               {spd}×
             </button>
           ))}
@@ -609,11 +610,9 @@ export default function DegreeHoursMap({ metadataData }) {
 
         {/* Camera zoom */}
         <div style={s.controlGroup}>
-          <button
-            onClick={() => { isZooming ? setIsZooming(false) : startZoom(); }}
-            style={{ ...s.btn, borderColor: isZooming ? "#C8B6FF" : "#3d4555", color: isZooming ? "#C8B6FF" : "#8b949e", background: isZooming ? "#C8B6FF22" : "none" }}
-            title="Oscillating zoom in/out (20 s cycle)"
-          >
+          <button onClick={() => { isZooming ? setIsZooming(false) : startZoom(); }}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZooming ? "#C8B6FF" : "#3d4555", color: isZooming ? "#C8B6FF" : "#8b949e", background: isZooming ? "#C8B6FF22" : "none" }}
+            title="Oscillating zoom in/out (20 s cycle)">
             {isZooming ? "⏸ Zoom" : "⇱ Zoom"}
           </button>
           {[0.5, 1, 2].map((amp) => (
@@ -623,15 +622,32 @@ export default function DegreeHoursMap({ metadataData }) {
           ))}
         </div>
 
+        {/* One-way zoom in */}
+        <div style={s.controlGroup}>
+          <button onClick={() => { isZoomIn ? setIsZoomIn(false) : startZoomIn(); }}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZoomIn ? "#C8B6FF" : "#3d4555", color: isZoomIn ? "#C8B6FF" : "#8b949e", background: isZoomIn ? "#C8B6FF22" : "none" }}
+            title="Zoom in one-way to a target magnification, then stops">
+            {isZoomIn ? "⏸ Zoom in" : "⊕ Zoom in"}
+          </button>
+          {[2, 3, 5, 10].map((f) => (
+            <button key={f} onClick={() => setZoomInFactor(f)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomInFactor === f ? "#C8B6FF" : "#3d4555", color: zoomInFactor === f ? "#C8B6FF" : "#8b949e", background: zoomInFactor === f ? "#C8B6FF22" : "none" }}>
+              {f}×
+            </button>
+          ))}
+          {[4000, 8000, 16000].map((d) => (
+            <button key={d} onClick={() => setZoomInDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomInDuration === d ? "#C8B6FF" : "#3d4555", color: zoomInDuration === d ? "#C8B6FF" : "#8b949e", background: zoomInDuration === d ? "#C8B6FF22" : "none" }}>
+              {d / 1000}s
+            </button>
+          ))}
+        </div>
+
         <div style={s.sep} />
 
-        {/* Tilt */}
+        {/* Tilt oscillate */}
         <div style={s.controlGroup}>
-          <button
-            onClick={() => { isTilting ? setIsTilting(false) : startTilt(); }}
-            style={{ ...s.btn, borderColor: isTilting ? "#FF6B9D" : "#3d4555", color: isTilting ? "#FF6B9D" : "#8b949e", background: isTilting ? "#FF6B9D22" : "none" }}
-            title="Oscillate camera pitch (15 s cycle)"
-          >
+          <button onClick={() => { isTilting ? setIsTilting(false) : startTilt(); }}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isTilting ? "#FF6B9D" : "#3d4555", color: isTilting ? "#FF6B9D" : "#8b949e", background: isTilting ? "#FF6B9D22" : "none" }}
+            title="Oscillate camera pitch (15 s cycle)">
             {isTilting ? "⏸ Tilt" : "⟂ Tilt"}
           </button>
           {[10, 20, 35].map((amp) => (
@@ -641,20 +657,38 @@ export default function DegreeHoursMap({ metadataData }) {
           ))}
         </div>
 
+        {/* Tilt one-way sweep */}
+        <div style={s.controlGroup}>
+          <button onClick={() => { isSweeping ? setIsSweeping(false) : startSweep(); }}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isSweeping ? "#FF6B9D" : "#3d4555", color: isSweeping ? "#FF6B9D" : "#8b949e", background: isSweeping ? "#FF6B9D22" : "none" }}
+            title="One-way tilt to target pitch, then stops">
+            {isSweeping ? "⏸ Sweep" : "↓ Sweep"}
+          </button>
+          <span style={s.label}>→</span>
+          {[5, 30, 60, 75].map((t) => (
+            <button key={t} onClick={() => setSweepTarget(t)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: sweepTarget === t ? "#FF6B9D" : "#3d4555", color: sweepTarget === t ? "#FF6B9D" : "#8b949e", background: sweepTarget === t ? "#FF6B9D22" : "none" }}>
+              {t}°
+            </button>
+          ))}
+          {[5000, 10000, 20000].map((d) => (
+            <button key={d} onClick={() => setSweepDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: sweepDuration === d ? "#FF6B9D" : "#3d4555", color: sweepDuration === d ? "#FF6B9D" : "#8b949e", background: sweepDuration === d ? "#FF6B9D22" : "none" }}>
+              {d / 1000}s
+            </button>
+          ))}
+        </div>
+
         <div style={s.sep} />
 
-        {/* Flyover */}
+        {/* Flyover — straight travel in bearing direction */}
         <div style={s.controlGroup}>
-          <button
-            onClick={() => { isFlyover ? stopFlyover() : startFlyover(); }}
-            style={{ ...s.btn, borderColor: isFlyover ? "#6BCB77" : "#3d4555", color: isFlyover ? "#6BCB77" : "#8b949e", background: isFlyover ? "#6BCB7722" : "none" }}
-            title="Orbit camera around scene centre (60 s cycle)"
-          >
-            {isFlyover ? "⏸ Flyover" : "◎ Flyover"}
+          <button onClick={() => setIsFlyover((v) => !v)}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isFlyover ? "#6BCB77" : "#3d4555", color: isFlyover ? "#6BCB77" : "#8b949e", background: isFlyover ? "#6BCB7722" : "none" }}
+            title="Fly straight in current bearing direction — combine with Rotate to steer">
+            {isFlyover ? "⏸ Flyover" : "→ Flyover"}
           </button>
-          {[75, 150, 400].map((r) => (
-            <button key={r} onClick={() => setFlyoverRadius(r)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: flyoverRadius === r ? "#6BCB77" : "#3d4555", color: flyoverRadius === r ? "#6BCB77" : "#8b949e", background: flyoverRadius === r ? "#6BCB7722" : "none" }}>
-              {r}m
+          {[10, 30, 100].map((spd) => (
+            <button key={spd} onClick={() => setFlyoverSpeed(spd)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: flyoverSpeed === spd ? "#6BCB77" : "#3d4555", color: flyoverSpeed === spd ? "#6BCB77" : "#8b949e", background: flyoverSpeed === spd ? "#6BCB7722" : "none" }}>
+              {spd}m/s
             </button>
           ))}
         </div>
@@ -771,6 +805,9 @@ const styles = {
     padding: "3px 9px",
     fontFamily: "monospace",
     lineHeight: 1.4,
+  },
+  toggleBtn: {
+    transition: "color 1s ease, border-color 1s ease, background 1s ease",
   },
   select: {
     background: "#161b22",
