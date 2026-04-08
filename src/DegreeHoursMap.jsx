@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import DeckGL from "@deck.gl/react";
 import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
-import { WebMercatorViewport } from "@deck.gl/core";
+import { WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
@@ -86,8 +86,8 @@ export default function DegreeHoursMap({ metadataData }) {
   const [mapStyleId, setMapStyleId]           = useState("dark");
   const [availableFields, setAvailableFields] = useState([]);
   const [selectedFields, setSelectedFields]   = useState([]);
-  const [heightScale, setHeightScale]         = useState(1.0);
-  const [radius, setRadius]                   = useState(6);
+  const [heightScale, setHeightScale]         = useState(5);
+  const [radius, setRadius]                   = useState(3);
   const [showBuildings, setShowBuildings]     = useState(true);
 
   // Parquet coordinates
@@ -106,22 +106,37 @@ export default function DegreeHoursMap({ metadataData }) {
   const [sweepDuration, setSweepDuration] = useState(10000); // ms to reach target
   const [isFlyover, setIsFlyover]       = useState(false);
   const [flyoverSpeed, setFlyoverSpeed] = useState(30);   // m/s straight travel
-  const [isZoomIn, setIsZoomIn]         = useState(false);
-  const [zoomInFactor, setZoomInFactor] = useState(3);    // multiplier (2×, 3×, 5×, 10×)
-  const [zoomInDuration, setZoomInDuration] = useState(8000); // ms
+  const [isZoomIn, setIsZoomIn]             = useState(false);
+  const [zoomInFactor, setZoomInFactor]     = useState(3);
+  const [zoomInDuration, setZoomInDuration] = useState(8000);
+  const [isZoomOut, setIsZoomOut]           = useState(false);
+  const [zoomOutFactor, setZoomOutFactor]   = useState(3);
+  const [zoomOutDuration, setZoomOutDuration] = useState(8000);
   const animFrameRef   = useRef(null);
   const lastTimeRef    = useRef(null);
-  const elapsedRef     = useRef(0);    // ms — drives zoom & tilt sine waves
-  const zoomBaseRef    = useRef(null); // zoom when zoom anim started
-  const pitchBaseRef   = useRef(null); // pitch when tilt/sweep started
-  const sweepElapsed   = useRef(0);   // ms elapsed in current sweep
-  const zoomInStart    = useRef(null); // zoom when zoom-in started
-  const zoomInElapsed  = useRef(0);   // ms elapsed in zoom-in
+  const elapsedRef     = useRef(0);
+  const zoomBaseRef    = useRef(null);
+  const pitchBaseRef   = useRef(null);
+  const sweepElapsed   = useRef(0);
+  const zoomInStart    = useRef(null);
+  const zoomInElapsed  = useRef(0);
+  const zoomOutStart   = useRef(null);
+  const zoomOutElapsed = useRef(0);
+
+  // ── Sequencer ──
+  const [cues, setCues]                   = useState([]);
+  const [activeCueIdx, setActiveCueIdx]   = useState(-1);
+  const [sequencerAuto, setSequencerAuto] = useState(false);
+  const [sequencerLoop, setSequencerLoop] = useState(false);
+  const [showSequencer, setShowSequencer] = useState(false);
+  const [presentMode, setPresentMode]     = useState(false);
+  const holdTimerRef                      = useRef(null);
+  const transitionTimerRef                = useRef(null);
 
   // Outlier filter
-  const [outlierActive, setOutlierActive]     = useState(false);
-  const [outlierCutoff, setOutlierCutoff]     = useState(null);   // actual applied cutoff
-  const [outlierInput, setOutlierInput]       = useState("");     // text field value
+  const [outlierActive, setOutlierActive]     = useState(true);
+  const [outlierCutoff, setOutlierCutoff]     = useState(2000);
+  const [outlierInput, setOutlierInput]       = useState("2000");
 
   // ── Data ──
   const [fieldCache, setFieldCache]   = useState({});
@@ -133,7 +148,7 @@ export default function DegreeHoursMap({ metadataData }) {
     fetchJson(`${API}/api/dh-fields`)
       .then((fields) => {
         setAvailableFields(fields);
-        const preferred = fields.find((f) => f.field === "Kh above 26°C");
+        const preferred = fields.find((f) => f.field === "dh_2018");
         if (preferred) setSelectedFields([preferred.field]);
       })
       .catch(console.error);
@@ -185,7 +200,7 @@ export default function DegreeHoursMap({ metadataData }) {
   }, [fieldCache, selectedFields]);
 
   // Single animation loop — all animations run in parallel
-  const isAnimating = isRotating || isZooming || isTilting || isSweeping || isFlyover || isZoomIn;
+  const isAnimating = isRotating || isZooming || isTilting || isSweeping || isFlyover || isZoomIn || isZoomOut;
   useEffect(() => {
     if (!isAnimating) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
@@ -202,16 +217,19 @@ export default function DegreeHoursMap({ metadataData }) {
       if (lastTimeRef.current !== null) {
         const dt = timestamp - lastTimeRef.current;
         elapsedRef.current += dt;
-        if (isSweeping) sweepElapsed.current += dt;
-        if (isZoomIn)  zoomInElapsed.current += dt;
+        if (isSweeping) sweepElapsed.current  += dt;
+        if (isZoomIn)   zoomInElapsed.current  += dt;
+        if (isZoomOut)  zoomOutElapsed.current += dt;
 
         let sweepDone = false;
         let zoomInDone = false;
+        let zoomOutDone = false;
 
         setViewState((vs) => {
           // ── Capture base values on first frame ──
-          if (isZooming  && zoomBaseRef.current  === null) zoomBaseRef.current  = vs.zoom;
-          if (isZoomIn   && zoomInStart.current  === null) zoomInStart.current  = vs.zoom;
+          if (isZooming  && zoomBaseRef.current   === null) zoomBaseRef.current   = vs.zoom;
+          if (isZoomIn   && zoomInStart.current   === null) zoomInStart.current   = vs.zoom;
+          if (isZoomOut  && zoomOutStart.current  === null) zoomOutStart.current  = vs.zoom;
           if (isTilting  && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
           if (isSweeping && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
 
@@ -229,6 +247,10 @@ export default function DegreeHoursMap({ metadataData }) {
             const t = Math.min(1, zoomInElapsed.current / zoomInDuration);
             zoom = (zoomInStart.current ?? vs.zoom) + Math.log2(zoomInFactor) * t;
             if (t >= 1) zoomInDone = true;
+          } else if (isZoomOut) {
+            const t = Math.min(1, zoomOutElapsed.current / zoomOutDuration);
+            zoom = (zoomOutStart.current ?? vs.zoom) - Math.log2(zoomOutFactor) * t;
+            if (t >= 1) zoomOutDone = true;
           }
 
           // ── Tilt (oscillate) ──
@@ -269,27 +291,157 @@ export default function DegreeHoursMap({ metadataData }) {
           zoomInStart.current   = null;
           zoomInElapsed.current = 0;
         }
+        if (zoomOutDone) {
+          setIsZoomOut(false);
+          zoomOutStart.current   = null;
+          zoomOutElapsed.current = 0;
+        }
       }
       lastTimeRef.current = timestamp;
       animFrameRef.current = requestAnimationFrame(step);
     };
     animFrameRef.current = requestAnimationFrame(step);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [isAnimating, isRotating, isZooming, isTilting, isSweeping, isFlyover, isZoomIn,
+  }, [isAnimating, isRotating, isZooming, isTilting, isSweeping, isFlyover, isZoomIn, isZoomOut,
       rotateSpeed, zoomAmp, tiltAmp, sweepTarget, sweepDuration, flyoverSpeed,
-      zoomInFactor, zoomInDuration]);
+      zoomInFactor, zoomInDuration, zoomOutFactor, zoomOutDuration]);
 
   const startZoom    = () => { elapsedRef.current = 0; zoomBaseRef.current = null; setIsZooming(true); };
   const startZoomIn  = () => { zoomInElapsed.current = 0; zoomInStart.current = null; setIsZoomIn(true); };
+  const startZoomOut = () => { zoomOutElapsed.current = 0; zoomOutStart.current = null; setIsZoomOut(true); };
   const startTilt    = () => { elapsedRef.current = 0; pitchBaseRef.current = null; setIsTilting(true); };
   const startSweep   = () => { sweepElapsed.current = 0; pitchBaseRef.current = null; setIsSweeping(true); };
+
+  // ── Sequencer helpers ──
+  const captureState = useCallback(() => ({
+    id: Date.now(),
+    label: "",                          // filled by caller
+    rotate: isRotating,   rotateSpeed,
+    zoom: isZooming,      zoomAmp,
+    zoomIn: isZoomIn,     zoomInFactor,   zoomInDuration,
+    zoomOut: isZoomOut,   zoomOutFactor,  zoomOutDuration,
+    tilt: isTilting,      tiltAmp,
+    sweep: isSweeping,    sweepTarget,    sweepDuration,
+    flyover: isFlyover,   flyoverSpeed,
+    hold: 5,              // seconds to wait before auto-advance
+    fade: 2,              // seconds for fly-to transition
+    view: { ...viewState },             // camera position snapshot
+  }), [isRotating, rotateSpeed, isZooming, zoomAmp,
+       isZoomIn, zoomInFactor, zoomInDuration,
+       isZoomOut, zoomOutFactor, zoomOutDuration,
+       isTilting, tiltAmp, isSweeping, sweepTarget, sweepDuration,
+       isFlyover, flyoverSpeed, viewState]);
+
+  const applyCue = useCallback((cue) => {
+    // Cancel any pending transition timer
+    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+
+    // Reset one-way refs so they restart cleanly
+    zoomInStart.current = null;   zoomInElapsed.current = 0;
+    zoomOutStart.current = null;  zoomOutElapsed.current = 0;
+    pitchBaseRef.current = null;  sweepElapsed.current = 0;
+
+    // Stop all animations during the fly-to
+    setIsRotating(false); setIsZooming(false); setIsZoomIn(false);
+    setIsZoomOut(false);  setIsTilting(false);  setIsSweeping(false); setIsFlyover(false);
+
+    const fadeMs = (cue.fade ?? 0) * 1000;
+
+    // Fly camera to saved position
+    if (cue.view) {
+      setViewState({
+        ...cue.view,
+        ...(fadeMs > 0 ? {
+          transitionDuration: fadeMs,
+          transitionInterpolator: new FlyToInterpolator({ speed: 1.5 }),
+        } : {}),
+      });
+    }
+
+    // Start cue animations after the fly-to completes
+    const startAnims = () => {
+      setIsRotating(cue.rotate);      setRotateSpeed(cue.rotateSpeed);
+      setIsZooming(cue.zoom);         setZoomAmp(cue.zoomAmp);
+      setIsZoomIn(cue.zoomIn);        setZoomInFactor(cue.zoomInFactor);   setZoomInDuration(cue.zoomInDuration);
+      setIsZoomOut(cue.zoomOut);      setZoomOutFactor(cue.zoomOutFactor); setZoomOutDuration(cue.zoomOutDuration);
+      setIsTilting(cue.tilt);         setTiltAmp(cue.tiltAmp);
+      setIsSweeping(cue.sweep);       setSweepTarget(cue.sweepTarget);     setSweepDuration(cue.sweepDuration);
+      setIsFlyover(cue.flyover);      setFlyoverSpeed(cue.flyoverSpeed);
+    };
+
+    if (fadeMs > 0) {
+      transitionTimerRef.current = setTimeout(startAnims, fadeMs);
+    } else {
+      startAnims();
+    }
+  }, []);
+
+  const updateCue = useCallback(() => {
+    if (activeCueIdx < 0) return;
+    const snapshot = captureState();
+    setCues((prev) => prev.map((c, i) => i === activeCueIdx
+      ? { ...snapshot, id: c.id, label: c.label, hold: c.hold, fade: c.fade }
+      : c
+    ));
+  }, [activeCueIdx, captureState]);
+
+  const saveCues = useCallback(() => {
+    try {
+      localStorage.setItem("dh-cues", JSON.stringify(cues));
+    } catch (e) { console.error("Save failed", e); }
+  }, [cues]);
+
+  const loadCues = useCallback(() => {
+    try {
+      const saved = localStorage.getItem("dh-cues");
+      if (saved) { setCues(JSON.parse(saved)); setActiveCueIdx(-1); setShowSequencer(true); }
+    } catch (e) { console.error("Load failed", e); }
+  }, []);
+
+  const addCue = useCallback(() => {
+    setCues((prev) => {
+      const n = prev.length + 1;
+      return [...prev, { ...captureState(), label: `Cue ${n}` }];
+    });
+    setShowSequencer(true);
+  }, [captureState]);
+
+  const goTo = useCallback((idx) => {
+    setCues((prev) => {
+      if (idx < 0 || idx >= prev.length) return prev;
+      applyCue(prev[idx]);
+      setActiveCueIdx(idx);
+      return prev;
+    });
+  }, [applyCue]);
+
+  // Auto-advance hold timer
+  useEffect(() => {
+    if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+    if (!sequencerAuto || activeCueIdx < 0) return;
+    const cue = cues[activeCueIdx];
+    if (!cue || !cue.hold) return;
+    holdTimerRef.current = setTimeout(() => {
+      const next = activeCueIdx + 1;
+      if (next < cues.length) {
+        goTo(next);
+      } else if (sequencerLoop) {
+        goTo(0);
+      } else {
+        setActiveCueIdx(-1);
+        setSequencerAuto(false);
+      }
+    }, cue.hold * 1000);
+    return () => clearTimeout(holdTimerRef.current);
+  }, [activeCueIdx, sequencerAuto, sequencerLoop, cues, goTo]);
 
   // Stop animations on manual interaction
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     if (interactionState?.isDragging || interactionState?.isRotating) setIsRotating(false);
     if (interactionState?.isZooming) {
       setIsZooming(false); zoomBaseRef.current = null;
-      setIsZoomIn(false);  zoomInStart.current = null; zoomInElapsed.current = 0;
+      setIsZoomIn(false);  zoomInStart.current = null;   zoomInElapsed.current = 0;
+      setIsZoomOut(false); zoomOutStart.current = null;  zoomOutElapsed.current = 0;
     }
     if (interactionState?.isDragging) {
       setIsTilting(false);
@@ -446,9 +598,9 @@ export default function DegreeHoursMap({ metadataData }) {
   const s = styles;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "calc(100vh - 220px)", minHeight: 520 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: presentMode ? "calc(100vh - 120px)" : "calc(100vh - 220px)", minHeight: 520 }}>
       {/* ── Controls row 1: field selection ── */}
-      <div style={s.controlBar}>
+      {!presentMode && <div style={s.controlBar}>
         {fieldGroups.year.length > 0 && (
           <div style={s.controlGroup}>
             <span style={s.label}>Year</span>
@@ -509,10 +661,10 @@ export default function DegreeHoursMap({ metadataData }) {
             </button>
           );
         })}
-      </div>
+      </div>}
 
       {/* ── Controls row 2: display options ── */}
-      <div style={s.controlBar}>
+      {!presentMode && <div style={s.controlBar}>
         {/* Outlier filter */}
         <div style={s.controlGroup}>
           <button
@@ -641,6 +793,25 @@ export default function DegreeHoursMap({ metadataData }) {
           ))}
         </div>
 
+        {/* One-way zoom out */}
+        <div style={s.controlGroup}>
+          <button onClick={() => { isZoomOut ? setIsZoomOut(false) : startZoomOut(); }}
+            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZoomOut ? "#C8B6FF" : "#3d4555", color: isZoomOut ? "#C8B6FF" : "#8b949e", background: isZoomOut ? "#C8B6FF22" : "none" }}
+            title="Zoom out one-way, then stops">
+            {isZoomOut ? "⏸ Zoom out" : "⊖ Zoom out"}
+          </button>
+          {[2, 3, 5, 10].map((f) => (
+            <button key={f} onClick={() => setZoomOutFactor(f)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomOutFactor === f ? "#C8B6FF" : "#3d4555", color: zoomOutFactor === f ? "#C8B6FF" : "#8b949e", background: zoomOutFactor === f ? "#C8B6FF22" : "none" }}>
+              {f}×
+            </button>
+          ))}
+          {[4000, 8000, 16000].map((d) => (
+            <button key={d} onClick={() => setZoomOutDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomOutDuration === d ? "#C8B6FF" : "#3d4555", color: zoomOutDuration === d ? "#C8B6FF" : "#8b949e", background: zoomOutDuration === d ? "#C8B6FF22" : "none" }}>
+              {d / 1000}s
+            </button>
+          ))}
+        </div>
+
         <div style={s.sep} />
 
         {/* Tilt oscillate */}
@@ -699,7 +870,34 @@ export default function DegreeHoursMap({ metadataData }) {
         <select value={mapStyleId} onChange={(e) => setMapStyleId(e.target.value)} style={s.select}>
           {MAP_STYLES.map((ms) => <option key={ms.id} value={ms.id}>{ms.name}</option>)}
         </select>
-      </div>
+
+        <div style={s.sep} />
+
+        {/* Sequencer toggle */}
+        <button onClick={() => setShowSequencer((v) => !v)}
+          style={{ ...s.btn, borderColor: showSequencer ? "#E9C46A" : "#3d4555", color: showSequencer ? "#E9C46A" : "#8b949e", background: showSequencer ? "#E9C46A22" : "none" }}>
+          ⬡ Sequencer {cues.length > 0 && `(${cues.length})`}
+        </button>
+        <button onClick={addCue}
+          style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
+          title="Add current view and animation state as a new cue">
+          ⊕ Add cue
+        </button>
+        <button onClick={updateCue}
+          disabled={activeCueIdx < 0}
+          style={{ ...s.btn, borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}
+          title="Update the active cue with current view and animation state">
+          ⟳ Update cue
+        </button>
+
+        <div style={s.sep} />
+
+        <button onClick={() => setPresentMode(true)}
+          style={{ ...s.btn, borderColor: "#C8B6FF", color: "#C8B6FF" }}
+          title="Hide controls for screen recording">
+          ⛶ Present
+        </button>
+      </div>}
 
       {/* ── Map ── */}
       <div style={{ position: "relative", flex: 1, minHeight: 300, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }}>
@@ -756,13 +954,160 @@ export default function DegreeHoursMap({ metadataData }) {
             )}
           </div>
         )}
+
+        {/* Present mode overlay controls */}
+        {presentMode && (
+          <div style={{ position: "absolute", top: 10, right: 10, zIndex: 20, display: "flex", gap: 5 }}>
+            <button
+              onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
+              disabled={cues.length === 0}
+              style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
+              Go ▶
+            </button>
+            <button
+              onClick={() => setSequencerAuto((v) => !v)}
+              style={{ ...s.presentBtn, borderColor: sequencerAuto ? "#6BCB77" : "#556677", color: sequencerAuto ? "#6BCB77" : "#8b949e" }}>
+              {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
+            </button>
+            <button
+              onClick={() => setPresentMode(false)}
+              style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>
+              ✕ Exit
+            </button>
+          </div>
+        )}
       </div>
 
-      <div style={{ fontSize: 11, color: "#556677" }}>
+      {/* ── Sequencer Panel ── */}
+      {!presentMode && showSequencer && (
+        <div style={s.sequencerPanel}>
+          {/* Header */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
+            <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700 }}>⬡ Cue List</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={saveCues}
+              style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
+              title="Save cue list to browser storage">
+              💾 Save
+            </button>
+            <button onClick={loadCues}
+              style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
+              title="Load previously saved cue list">
+              📂 Load
+            </button>
+            <button
+              onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }}
+              disabled={activeCueIdx <= 0}
+              style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>
+              ◀ Back
+            </button>
+            <button
+              onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
+              disabled={cues.length === 0}
+              style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
+              Go ▶
+            </button>
+            <button
+              onClick={() => setSequencerAuto((v) => !v)}
+              style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>
+              {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
+            </button>
+            <button
+              onClick={() => setSequencerLoop((v) => !v)}
+              style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }}
+              title="Loop back to cue 1 after the last cue">
+              ↺ Loop
+            </button>
+          </div>
+
+          {/* Empty state */}
+          {cues.length === 0 && (
+            <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>
+              No cues — click ⊕ Add cue to capture the current animation state
+            </div>
+          )}
+
+          {/* Cue rows */}
+          {cues.map((cue, idx) => {
+            const isActive = idx === activeCueIdx;
+            const anims = [];
+            if (cue.rotate)  anims.push(`↻ ${cue.rotateSpeed}°/s`);
+            if (cue.zoom)    anims.push(`⇱ ±${cue.zoomAmp}`);
+            if (cue.zoomIn)  anims.push(`⊕ ${cue.zoomInFactor}× ${cue.zoomInDuration/1000}s`);
+            if (cue.zoomOut) anims.push(`⊖ ${cue.zoomOutFactor}× ${cue.zoomOutDuration/1000}s`);
+            if (cue.tilt)    anims.push(`⟂ ±${cue.tiltAmp}°`);
+            if (cue.sweep)   anims.push(`↓ ${cue.sweepTarget}° ${cue.sweepDuration/1000}s`);
+            if (cue.flyover) anims.push(`→ ${cue.flyoverSpeed}m/s`);
+            if (!anims.length) anims.push("—");
+            return (
+              <div key={cue.id} onClick={() => goTo(idx)} style={{
+                display: "flex", alignItems: "center", gap: 5,
+                padding: "4px 8px", borderRadius: 5, cursor: "pointer",
+                background: isActive ? "#E9C46A18" : "transparent",
+                border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`,
+                marginBottom: 3,
+              }}>
+                {/* Cue number */}
+                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 18, textAlign: "right" }}>
+                  {idx + 1}
+                </span>
+                {/* Label — editable */}
+                <input
+                  value={cue.label}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))}
+                  style={{ ...s.numInput, width: 76, background: "transparent", border: "1px solid transparent" }}
+                  onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }}
+                  onBlur={(e) => { e.target.style.borderColor = "transparent"; }}
+                />
+                {/* Animation summary */}
+                <span style={{ flex: 1, fontSize: 10, color: "#8b949e", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                  {anims.join("  ")}
+                </span>
+                {/* Fade time */}
+                <span style={{ fontSize: 10, color: "#556677" }}>fade</span>
+                <input
+                  type="number" min={0} step={0.5}
+                  value={cue.fade ?? 0}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))}
+                  style={{ ...s.numInput, width: 38 }}
+                />
+                <span style={{ fontSize: 10, color: "#556677" }}>s</span>
+                {/* Hold time */}
+                <span style={{ fontSize: 10, color: "#556677", marginLeft: 3 }}>hold</span>
+                <input
+                  type="number" min={0}
+                  value={cue.hold}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))}
+                  style={{ ...s.numInput, width: 38 }}
+                />
+                <span style={{ fontSize: 10, color: "#556677" }}>s</span>
+                {/* Reorder */}
+                <button
+                  disabled={idx === 0}
+                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }}
+                  style={{ ...s.btn, padding: "1px 5px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
+                <button
+                  disabled={idx === cues.length - 1}
+                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }}
+                  style={{ ...s.btn, padding: "1px 5px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
+                {/* Delete */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }}
+                  style={{ ...s.btn, padding: "1px 6px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!presentMode && <div style={{ fontSize: 11, color: "#556677" }}>
         Pre-calculated summer degree-hours per sensor.
         {activeCutoff !== null && ` Outlier filter active: hiding sensors above ${activeCutoff} — color scale recalculated from remaining data.`}
         {selectedFields.length > 1 && " Multiple fields shown side-by-side (offset East)."}
-      </div>
+      </div>}
     </div>
   );
 }
@@ -846,6 +1191,25 @@ const styles = {
     color: "#c9d1d9",
     zIndex: 10,
     pointerEvents: "none",
+  },
+  presentBtn: {
+    background: "rgba(22,27,34,0.85)",
+    backdropFilter: "blur(4px)",
+    border: "1px solid #556677",
+    borderRadius: 6,
+    cursor: "pointer",
+    fontFamily: "monospace",
+    fontSize: 11,
+    padding: "4px 10px",
+  },
+  sequencerPanel: {
+    background: "#161b22",
+    border: "1px solid #2e3440",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontFamily: "monospace",
+    maxHeight: 280,
+    overflowY: "auto",
   },
   legend: {
     position: "absolute",
