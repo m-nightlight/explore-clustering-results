@@ -726,7 +726,7 @@ export default function DegreeHoursMap({ metadataData }) {
         {/* Legend */}
         {!loading && selectedFields.length > 0 && (
           <div style={s.legend}>
-            <div style={{ fontSize: 10, color: "#8b949e", marginBottom: 4 }}>
+            <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
               {selectedFields.map((f) => FIELD_META[f]?.label ?? f).join(" · ")}
               {activeCutoff !== null && (
                 <span style={{ color: "#f85149" }}> · cutoff {activeCutoff}</span>
@@ -734,21 +734,21 @@ export default function DegreeHoursMap({ metadataData }) {
             </div>
             {/* Color bar */}
             <div style={{
-              width: 140, height: 10, borderRadius: 3,
+              width: 210, height: 14, borderRadius: 4,
               background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})`,
             }} />
-            <div style={{ display: "flex", justifyContent: "space-between", width: 140, marginTop: 2, fontSize: 10, color: "#8b949e" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
               <span>0</span>
               <span>{Math.round(maxValue / 2).toLocaleString()}</span>
               <span>{Math.round(maxValue).toLocaleString()}</span>
             </div>
-            <div style={{ marginTop: 5, fontSize: 10, color: "#8b949e" }}>
+            <div style={{ marginTop: 7, fontSize: 13, color: "#8b949e" }}>
               Max height: {Math.round(40 * heightScale)} m
             </div>
             {selectedFields.length > 1 && (
-              <div style={{ marginTop: 5, display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div style={{ marginTop: 7, display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {selectedFields.map((f, i) => (
-                  <span key={f} style={{ fontSize: 10, color: FIELD_COLORS[i % FIELD_COLORS.length], fontWeight: 700 }}>
+                  <span key={f} style={{ fontSize: 13, color: FIELD_COLORS[i % FIELD_COLORS.length], fontWeight: 700 }}>
                     ▪ {FIELD_META[f]?.label ?? f}
                   </span>
                 ))}
@@ -855,9 +855,10 @@ const styles = {
     background: "rgba(22,27,34,0.88)",
     backdropFilter: "blur(4px)",
     border: "1px solid #2e3440",
-    borderRadius: 7,
-    padding: "8px 12px",
+    borderRadius: 10,
+    padding: "12px 18px",
     fontFamily: "monospace",
     pointerEvents: "none",
+    fontSize: 15,
   },
 };
