@@ -828,7 +828,7 @@ async def upsert_custom_cluster_col(name: str, request: Request):
               SET cluster_mapping = EXCLUDED.cluster_mapping,
                   updated_at = NOW()
             """,
-            name, json.dumps(clean),
+            name, clean,
         )
     request.app.state.custom_cluster_cols[name] = clean
     return {"ok": True, "name": name, "count": len(clean)}
@@ -904,6 +904,61 @@ async def get_outdoor_timeseries(request: Request, year: int = Query(...)):
             seen_ts.add(ts)
         sensors.setdefault(sid, []).append(r["temperature"])
     return {"timestamps": timestamps, "sensors": sensors}
+
+
+# Pre-calculated degree-hour field names stored in sensors.properties
+DH_FIELDS = [
+    "dh_2018",
+    "dh_2024",
+    "dh_2025",
+    "Kh above 26°C",
+    "Kh above 27°C",
+    "Kh above 28°C",
+    "tc_h",
+]
+
+
+@app.get("/api/dh-fields")
+async def get_dh_fields(request: Request):
+    """Return pre-calculated degree-hour fields that have non-zero data."""
+    async with request.app.state.pool.acquire() as conn:
+        result = []
+        for field in DH_FIELDS:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM sensors
+                WHERE sensor_type != 'outdoor'
+                  AND (properties->>$1)::double precision > 0
+                """,
+                field,
+            )
+            if count and count > 0:
+                result.append({"field": field, "count": int(count)})
+    return result
+
+
+@app.get("/api/dh-data")
+async def get_dh_data(request: Request, field: str = Query(...)):
+    """Return per-sensor values for a pre-calculated degree-hours field."""
+    if field not in DH_FIELDS:
+        raise HTTPException(400, f"Unknown field. Allowed: {DH_FIELDS}")
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT sensor_id, lat, lon,
+                   (properties->>$1)::double precision AS value
+            FROM sensors
+            WHERE sensor_type != 'outdoor'
+              AND properties->>$1 IS NOT NULL
+            ORDER BY sensor_id
+            """,
+            field,
+        )
+    return [
+        {"sensor_id": r["sensor_id"], "lat": r["lat"], "lon": r["lon"], "value": r["value"] or 0.0}
+        for r in rows
+        if r["lat"] is not None and r["lon"] is not None
+    ]
 
 
 @app.delete("/api/custom-cluster-cols/{name}")

@@ -9,6 +9,7 @@ import Map from "react-map-gl/mapbox";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { getSunInfo, getSunPath } from "./utils/sunPosition";
 import { fetchStrangData, getIrradiance, clearSkyEstimate } from "./utils/smhiIrradiance";
+import DegreeHoursMap from "./DegreeHoursMap";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 
@@ -77,6 +78,7 @@ const TABS = [
   { id: "timeseries",label: "Time Series",          icon: "◆" },
   { id: "metadata",  label: "Metadata Statistics",  icon: "▦" },
   { id: "map",       label: "Sensor Map",           icon: "◉" },
+  { id: "deghours",  label: "Degree Hours",         icon: "▲" },
 ];
 
 // ─── Main App ────────────────────────────────────────────────────
@@ -563,6 +565,9 @@ export default function App() {
                 customClusterCols={customClusterCols}
                 navigateToBuilding={navigateToBuilding}
               />
+            )}
+            {activeTab === "deghours" && (
+              <DegreeHoursMap metadataData={metadataData} />
             )}
 
           </main>
@@ -3932,10 +3937,13 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                         </p>
                         {activeSensorProperties?.length > 0 && (() => {
                           const METRICS = [
+                            { key: "dh_2018",        label: "DH 2018"   },
+                            { key: "dh_2024",        label: "DH 2024"   },
+                            { key: "dh_2025",        label: "DH 2025"   },
                             { key: "Kh above 26°C", label: "h > 26 °C" },
                             { key: "Kh above 27°C", label: "h > 27 °C" },
                             { key: "Kh above 28°C", label: "h > 28 °C" },
-                            { key: "tc_h",           label: "Comfort h" },
+                            { key: "tc_h",           label: "tc_h"      },
                           ];
                           return (
                             <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "6px 0 2px" }}>

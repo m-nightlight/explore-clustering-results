@@ -1,0 +1,826 @@
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import DeckGL from "@deck.gl/react";
+import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
+import { WebMercatorViewport } from "@deck.gl/core";
+import Map from "react-map-gl/mapbox";
+
+const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
+const API = "http://localhost:8000";
+
+const MAP_STYLES = [
+  { id: "dark",      name: "Dark",      url: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" },
+  { id: "light",     name: "Light",     url: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json" },
+  { id: "voyager",   name: "Voyager",   url: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json" },
+  { id: "satellite", name: "Satellite", url: "mapbox://styles/matspmapping/cmg9qmif500a801sa4f0b5p5o" },
+];
+
+const resolveStyle = (url) =>
+  url.startsWith("mapbox://styles/")
+    ? `https://api.mapbox.com/styles/v1/${url.slice(16)}?access_token=${MAPBOX_TOKEN}`
+    : url;
+
+// Blue → teal → yellow-green → orange → red
+const DH_COLOR_STOPS = [
+  [70,  130, 200],
+  [50,  200, 160],
+  [160, 220,  70],
+  [255, 150,   0],
+  [220,  20,  20],
+];
+
+function dhToColor(value, max) {
+  if (max <= 0) return DH_COLOR_STOPS[0];
+  const t = Math.max(0, Math.min(1, value / max));
+  const scaled = t * (DH_COLOR_STOPS.length - 1);
+  const lo = Math.floor(scaled);
+  const hi = Math.min(lo + 1, DH_COLOR_STOPS.length - 1);
+  const f = scaled - lo;
+  return DH_COLOR_STOPS[lo].map((c, i) => Math.round(c + f * (DH_COLOR_STOPS[hi][i] - c)));
+}
+
+const FIELD_META = {
+  "dh_2018":       { label: "2018",      group: "year",      unit: "°Ch" },
+  "dh_2024":       { label: "2024",      group: "year",      unit: "°Ch" },
+  "dh_2025":       { label: "2025",      group: "year",      unit: "°Ch" },
+  "Kh above 26°C": { label: "Kh >26°C", group: "threshold", unit: "°Ch" },
+  "Kh above 27°C": { label: "Kh >27°C", group: "threshold", unit: "°Ch" },
+  "Kh above 28°C": { label: "Kh >28°C", group: "threshold", unit: "°Ch" },
+  "tc_h":          { label: "tc_h",      group: "other",     unit: "h"   },
+};
+
+const FIELD_COLORS = ["#E9C46A", "#4CC9F0", "#FF6B9D", "#6BCB77", "#C8B6FF"];
+
+// Compute a percentile value from a sorted array
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  const idx = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+const fetchJson = (url) => fetch(url).then((r) => r.json());
+
+// ─── DegreeHoursMap ──────────────────────────────────────────────
+export default function DegreeHoursMap({ metadataData }) {
+  // ── View state ──
+  const [viewState, setViewState] = useState(() => {
+    if (!metadataData?.length)
+      return { longitude: 11.97, latitude: 57.71, zoom: 14, pitch: 55, bearing: -20 };
+    const lats = metadataData.filter((r) => r.lat != null).map((r) => r.lat);
+    const lons = metadataData.filter((r) => r.lon != null).map((r) => r.lon);
+    if (!lats.length)
+      return { longitude: 11.97, latitude: 57.71, zoom: 14, pitch: 55, bearing: -20 };
+    try {
+      const vp = new WebMercatorViewport({ width: 900, height: 600 });
+      const { longitude, latitude, zoom } = vp.fitBounds(
+        [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        { padding: 60 }
+      );
+      return { longitude, latitude, zoom: Math.min(zoom + 1, 15), pitch: 55, bearing: -20 };
+    } catch {
+      return { longitude: 11.97, latitude: 57.71, zoom: 14, pitch: 55, bearing: -20 };
+    }
+  });
+
+  // ── Controls ──
+  const [mapStyleId, setMapStyleId]           = useState("dark");
+  const [availableFields, setAvailableFields] = useState([]);
+  const [selectedFields, setSelectedFields]   = useState([]);
+  const [heightScale, setHeightScale]         = useState(1.0);
+  const [radius, setRadius]                   = useState(6);
+  const [showBuildings, setShowBuildings]     = useState(true);
+
+  // Parquet coordinates
+  const [useParquetCoords, setUseParquetCoords] = useState(true);
+  const [pointHeights, setPointHeights]         = useState({});
+
+  // Camera animation
+  const [isRotating, setIsRotating]   = useState(false);
+  const [rotateSpeed, setRotateSpeed] = useState(0.3);  // °/s
+  const [isZooming, setIsZooming]     = useState(false);
+  const [zoomAmp, setZoomAmp]         = useState(1.0);  // zoom-level amplitude
+  const [isTilting, setIsTilting]     = useState(false);
+  const [tiltAmp, setTiltAmp]         = useState(20);   // ± degrees pitch
+  const [isFlyover, setIsFlyover]     = useState(false);
+  const [flyoverRadius, setFlyoverRadius] = useState(150); // orbit radius in metres
+  const animFrameRef   = useRef(null);
+  const lastTimeRef    = useRef(null);
+  const elapsedRef     = useRef(0);       // ms — drives zoom & tilt sine waves
+  const zoomBaseRef    = useRef(null);    // zoom when zoom anim started
+  const pitchBaseRef   = useRef(null);    // pitch when tilt anim started
+  const orbitCenterRef = useRef(null);    // {lon, lat} fixed orbit centre
+  const orbitAngleRef  = useRef(0);       // current orbit angle in radians
+
+  // Outlier filter
+  const [outlierActive, setOutlierActive]     = useState(false);
+  const [outlierCutoff, setOutlierCutoff]     = useState(null);   // actual applied cutoff
+  const [outlierInput, setOutlierInput]       = useState("");     // text field value
+
+  // ── Data ──
+  const [fieldCache, setFieldCache]   = useState({});
+  const [loading, setLoading]         = useState(false);
+  const [buildings3D, setBuildings3D] = useState(null);
+
+  // ── One-time fetches ──
+  useEffect(() => {
+    fetchJson(`${API}/api/dh-fields`)
+      .then((fields) => {
+        setAvailableFields(fields);
+        const preferred = fields.find((f) => f.field === "Kh above 26°C");
+        if (preferred) setSelectedFields([preferred.field]);
+      })
+      .catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    fetchJson(`${API}/api/point-heights`).then(setPointHeights).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchJson(`${API}/api/all-buildings`).then(setBuildings3D).catch(() => {});
+  }, []);
+
+  // ── Fetch field data on demand ──
+  useEffect(() => {
+    const missing = selectedFields.filter((f) => !fieldCache[f]);
+    if (!missing.length) return;
+    setLoading(true);
+    Promise.all(
+      missing.map((f) =>
+        fetchJson(`${API}/api/dh-data?field=${encodeURIComponent(f)}`)
+          .then((data) => ({ field: f, data }))
+          .catch(() => ({ field: f, data: [] }))
+      )
+    ).then((results) => {
+      setFieldCache((prev) => {
+        const next = { ...prev };
+        results.forEach(({ field, data }) => { next[field] = data; });
+        return next;
+      });
+      setLoading(false);
+    });
+  }, [selectedFields]);
+
+  // ── Auto-suggest outlier cutoff when data arrives (99th percentile) ──
+  useEffect(() => {
+    if (outlierCutoff !== null) return; // already set by user
+    const all = [];
+    selectedFields.forEach((f) => {
+      const data = fieldCache[f];
+      if (data) data.forEach((d) => { if (d.value > 0) all.push(d.value); });
+    });
+    if (!all.length) return;
+    const sorted = [...all].sort((a, b) => a - b);
+    const p99 = percentile(sorted, 99);
+    const suggested = Math.ceil(p99);
+    setOutlierCutoff(suggested);
+    setOutlierInput(String(suggested));
+  }, [fieldCache, selectedFields]);
+
+  // Single animation loop — rotation, zoom, tilt, flyover all run in parallel
+  const isAnimating = isRotating || isZooming || isTilting || isFlyover;
+  useEffect(() => {
+    if (!isAnimating) {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      lastTimeRef.current = null;
+      return;
+    }
+    const ZOOM_PERIOD_MS  = 20000; // 20 s per in-out cycle
+    const TILT_PERIOD_MS  = 15000; // 15 s per tilt cycle
+    const ORBIT_PERIOD_MS = 60000; // 60 s per full orbit
+    // lon/lat metres → degrees at ~57.7°N
+    const LON_PER_M = 1 / 59400;
+    const LAT_PER_M = 1 / 111000;
+
+    const step = (timestamp) => {
+      if (lastTimeRef.current !== null) {
+        const dt = timestamp - lastTimeRef.current;
+        elapsedRef.current += dt;
+
+        setViewState((vs) => {
+          // ── Capture base values on first frame ──
+          if (isZooming   && zoomBaseRef.current  === null) zoomBaseRef.current  = vs.zoom;
+          if (isTilting   && pitchBaseRef.current  === null) pitchBaseRef.current  = vs.pitch;
+          if (isFlyover   && orbitCenterRef.current === null)
+            orbitCenterRef.current = { lon: vs.longitude, lat: vs.latitude };
+
+          // ── Rotation ──
+          const bearing = isRotating
+            ? (vs.bearing + rotateSpeed * (dt / 1000)) % 360
+            : isFlyover
+              // flyover steers bearing to match direction of travel (tangent of orbit)
+              ? ((orbitAngleRef.current * 180) / Math.PI + 90 + 360) % 360
+              : vs.bearing;
+
+          // ── Zoom ──
+          const zoom = isZooming
+            ? (zoomBaseRef.current ?? vs.zoom) +
+              zoomAmp * Math.sin((2 * Math.PI * elapsedRef.current) / ZOOM_PERIOD_MS)
+            : vs.zoom;
+
+          // ── Tilt ──
+          const pitch = isTilting
+            ? Math.max(0, Math.min(80,
+                (pitchBaseRef.current ?? vs.pitch) +
+                tiltAmp * Math.sin((2 * Math.PI * elapsedRef.current) / TILT_PERIOD_MS)
+              ))
+            : vs.pitch;
+
+          // ── Flyover orbit ──
+          let longitude = vs.longitude;
+          let latitude  = vs.latitude;
+          if (isFlyover && orbitCenterRef.current) {
+            const { lon: cLon, lat: cLat } = orbitCenterRef.current;
+            const dAngle = (2 * Math.PI * (dt / 1000)) / (ORBIT_PERIOD_MS / 1000);
+            orbitAngleRef.current = (orbitAngleRef.current + dAngle) % (2 * Math.PI);
+            const θ = orbitAngleRef.current;
+            longitude = cLon + flyoverRadius * LON_PER_M * Math.sin(θ);
+            latitude  = cLat + flyoverRadius * LAT_PER_M * Math.cos(θ);
+          }
+
+          return { ...vs, bearing, zoom, pitch, longitude, latitude };
+        });
+      }
+      lastTimeRef.current = timestamp;
+      animFrameRef.current = requestAnimationFrame(step);
+    };
+    animFrameRef.current = requestAnimationFrame(step);
+    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
+  }, [isAnimating, isRotating, isZooming, isTilting, isFlyover,
+      rotateSpeed, zoomAmp, tiltAmp, flyoverRadius]);
+
+  const startZoom = () => {
+    elapsedRef.current = 0;
+    zoomBaseRef.current = null;
+    setIsZooming(true);
+  };
+  const startTilt = () => {
+    elapsedRef.current = 0;
+    pitchBaseRef.current = null;
+    setIsTilting(true);
+  };
+  const startFlyover = () => {
+    orbitCenterRef.current = null; // captured from live viewState on first frame
+    orbitAngleRef.current  = 0;
+    setIsFlyover(true);
+  };
+  const stopFlyover = () => {
+    setIsFlyover(false);
+    orbitCenterRef.current = null;
+  };
+
+  // Stop animations on manual interaction
+  const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
+    if (interactionState?.isDragging || interactionState?.isRotating) setIsRotating(false);
+    if (interactionState?.isZooming) { setIsZooming(false); zoomBaseRef.current = null; }
+    if (interactionState?.isDragging) {
+      setIsTilting(false);  pitchBaseRef.current = null;
+      setIsFlyover(false);  orbitCenterRef.current = null;
+    }
+    setViewState({ ...vs });
+  }, []);
+
+  // Also update suggestion when fields change (if user hasn't manually set it)
+  const userSetCutoffRef = useRef(false);
+  const applyOutlierInput = () => {
+    const v = parseFloat(outlierInput);
+    if (!isNaN(v) && v > 0) {
+      userSetCutoffRef.current = true;
+      setOutlierCutoff(v);
+    }
+  };
+
+  // ── Effective cutoff (null = no filtering) ──
+  const activeCutoff = outlierActive && outlierCutoff != null ? outlierCutoff : null;
+
+  // ── Max value for color/height scale (respects outlier filter) ──
+  const maxValue = useMemo(() => {
+    let max = 0;
+    selectedFields.forEach((f) => {
+      const data = fieldCache[f];
+      if (data) {
+        data.forEach((d) => {
+          const v = d.value;
+          if (activeCutoff !== null && v > activeCutoff) return; // skip outlier
+          if (v > max) max = v;
+        });
+      }
+    });
+    return max || 1;
+  }, [fieldCache, selectedFields, activeCutoff]);
+
+  // Count outliers across all selected fields
+  const outlierCount = useMemo(() => {
+    if (activeCutoff === null) return 0;
+    let n = 0;
+    selectedFields.forEach((f) => {
+      const data = fieldCache[f];
+      if (data) data.forEach((d) => { if (d.value > activeCutoff) n++; });
+    });
+    return n;
+  }, [fieldCache, selectedFields, activeCutoff]);
+
+  // Auto-scale: max column ≈ 40 m
+  const baseH = maxValue > 0 ? 40 / maxValue : 1;
+
+  // ── Layers ──
+  const layers = useMemo(() => {
+    const ls = [];
+
+    if (showBuildings && buildings3D?.features?.length) {
+      ls.push(
+        new GeoJsonLayer({
+          id: "dh-buildings",
+          data: buildings3D,
+          filled: true,
+          stroked: false,
+          extruded: true,
+          getElevation: (f) => f.properties?.height ?? 10,
+          getFillColor: [55, 75, 110, 130],
+          material: { ambient: 0.4, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
+        })
+      );
+    }
+
+    const LON_PER_M = 1 / 59400; // at ~57.7°N
+    const gap = radius * 2.5 + 2;
+
+    selectedFields.forEach((field, idx) => {
+      const data = fieldCache[field];
+      if (!data?.length) return;
+
+      const lonOffset = idx * gap * LON_PER_M;
+
+      // Filter outliers; build position array with parquet coords applied
+      const visible = data.filter((d) => activeCutoff === null || d.value <= activeCutoff);
+
+      ls.push(
+        new ColumnLayer({
+          id: `dh-${field}`,
+          data: visible,
+          getPosition: (d) => {
+            const h = pointHeights[d.sensor_id];
+            const lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
+            const lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
+            return [lon + lonOffset, lat];
+          },
+          getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
+          getFillColor: (d) => [...dhToColor(d.value, maxValue), 230],
+          getLineColor: (d) => [...dhToColor(d.value, maxValue), 80],
+          radius,
+          diskResolution: 18,
+          extruded: true,
+          stroked: false,
+          pickable: true,
+          updateTriggers: {
+            getPosition:  [useParquetCoords, pointHeights, lonOffset],
+            getElevation: [baseH, heightScale],
+            getFillColor: [maxValue],
+          },
+        })
+      );
+    });
+
+    return ls;
+  }, [
+    showBuildings, buildings3D,
+    selectedFields, fieldCache,
+    heightScale, radius, maxValue, baseH,
+    activeCutoff,
+    useParquetCoords, pointHeights,
+  ]);
+
+  // ── Tooltip ──
+  const getTooltip = useCallback(({ object, layer }) => {
+    if (!object) return null;
+    const field = layer?.id?.replace("dh-", "");
+    const meta = FIELD_META[field] ?? { label: field, unit: "" };
+    return {
+      html: `<strong style="color:#e0e0e0">${object.sensor_id}</strong><br/><span style="color:#8b949e">${meta.label}</span><br/><span style="color:#E9C46A;font-size:13px"><strong>${object.value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${meta.unit}</strong></span>`,
+      style: {
+        background: "#1a1f2e",
+        border: "1px solid #3d4555",
+        borderRadius: "6px",
+        padding: "8px 12px",
+        fontSize: "12px",
+        fontFamily: "monospace",
+        pointerEvents: "none",
+      },
+    };
+  }, []);
+
+  const toggleField = (f) => {
+    setSelectedFields((prev) =>
+      prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]
+    );
+  };
+
+  const fieldGroups = useMemo(() => {
+    const groups = { year: [], threshold: [], other: [] };
+    availableFields.forEach(({ field }) => {
+      const g = FIELD_META[field]?.group ?? "other";
+      groups[g].push(field);
+    });
+    return groups;
+  }, [availableFields]);
+
+  const s = styles;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "calc(100vh - 220px)", minHeight: 520 }}>
+      {/* ── Controls row 1: field selection ── */}
+      <div style={s.controlBar}>
+        {fieldGroups.year.length > 0 && (
+          <div style={s.controlGroup}>
+            <span style={s.label}>Year</span>
+            {fieldGroups.year.map((f) => {
+              const active = selectedFields.includes(f);
+              const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+              return (
+                <button key={f} onClick={() => toggleField(f)} style={{
+                  ...s.btn,
+                  borderColor: active ? color : "#3d4555",
+                  color: active ? color : "#8b949e",
+                  background: active ? `${color}22` : "none",
+                  fontWeight: active ? 700 : 400,
+                }}>
+                  {FIELD_META[f]?.label ?? f}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {fieldGroups.year.length > 0 && <div style={s.sep} />}
+
+        {fieldGroups.threshold.length > 0 && (
+          <div style={s.controlGroup}>
+            <span style={s.label}>Threshold</span>
+            {fieldGroups.threshold.map((f) => {
+              const active = selectedFields.includes(f);
+              const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+              return (
+                <button key={f} onClick={() => toggleField(f)} style={{
+                  ...s.btn,
+                  borderColor: active ? color : "#3d4555",
+                  color: active ? color : "#8b949e",
+                  background: active ? `${color}22` : "none",
+                  fontWeight: active ? 700 : 400,
+                }}>
+                  {FIELD_META[f]?.label ?? f}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {fieldGroups.threshold.length > 0 && <div style={s.sep} />}
+
+        {fieldGroups.other.map((f) => {
+          const active = selectedFields.includes(f);
+          const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+          return (
+            <button key={f} onClick={() => toggleField(f)} style={{
+              ...s.btn,
+              borderColor: active ? color : "#3d4555",
+              color: active ? color : "#8b949e",
+              background: active ? `${color}22` : "none",
+            }}>
+              {FIELD_META[f]?.label ?? f}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Controls row 2: display options ── */}
+      <div style={s.controlBar}>
+        {/* Outlier filter */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => setOutlierActive((v) => !v)}
+            style={{
+              ...s.btn,
+              borderColor: outlierActive ? "#f85149" : "#3d4555",
+              color: outlierActive ? "#f85149" : "#8b949e",
+              background: outlierActive ? "#f8514922" : "none",
+            }}
+          >
+            ⚠ Outlier filter
+          </button>
+          <span style={s.label}>cutoff</span>
+          <input
+            value={outlierInput}
+            onChange={(e) => setOutlierInput(e.target.value)}
+            onBlur={applyOutlierInput}
+            onKeyDown={(e) => e.key === "Enter" && applyOutlierInput()}
+            style={{ ...s.numInput, width: 60 }}
+            placeholder="value"
+            title="Sensors above this value are hidden. Color & height scale recalculated."
+          />
+          {outlierActive && outlierCount > 0 && (
+            <span style={{ fontSize: 10, color: "#f85149" }}>
+              {outlierCount} hidden
+            </span>
+          )}
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Height scale */}
+        <div style={s.controlGroup}>
+          <span style={s.label}>Height ×{heightScale.toFixed(1)}</span>
+          <input type="range" min={0.1} max={25} step={0.1} value={heightScale}
+            onChange={(e) => setHeightScale(Number(e.target.value))}
+            style={{ width: 160, accentColor: "#E9C46A", cursor: "pointer" }} />
+        </div>
+
+        {/* Radius */}
+        <div style={s.controlGroup}>
+          <span style={s.label}>r {radius}m</span>
+          <input type="range" min={2} max={20} step={1} value={radius}
+            onChange={(e) => setRadius(Number(e.target.value))}
+            style={{ width: 60, accentColor: "#58a6ff", cursor: "pointer" }} />
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Parquet coords */}
+        <button
+          onClick={() => setUseParquetCoords((v) => !v)}
+          style={{
+            ...s.btn,
+            borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555",
+            color: useParquetCoords ? "#4CC9F0" : "#8b949e",
+            background: useParquetCoords ? "#4CC9F022" : "none",
+          }}
+          title="Use refined sensor coordinates from parquet file"
+        >
+          ⌖ Parquet coords
+        </button>
+
+        {/* Buildings */}
+        <button
+          onClick={() => setShowBuildings((v) => !v)}
+          style={{
+            ...s.btn,
+            borderColor: showBuildings ? "#6BCB77" : "#3d4555",
+            color: showBuildings ? "#6BCB77" : "#8b949e",
+            background: showBuildings ? "#6BCB7722" : "none",
+          }}
+        >
+          ▦ Bldgs
+        </button>
+
+        <div style={s.sep} />
+
+        {/* Camera rotation */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => setIsRotating((v) => !v)}
+            style={{
+              ...s.btn,
+              borderColor: isRotating ? "#E9C46A" : "#3d4555",
+              color:        isRotating ? "#E9C46A" : "#8b949e",
+              background:   isRotating ? "#E9C46A22" : "none",
+            }}
+            title="Rotate camera continuously"
+          >
+            {isRotating ? "⏸ Rotate" : "↻ Rotate"}
+          </button>
+          {[0.1, 0.3, 1, 3].map((spd) => (
+            <button
+              key={spd}
+              onClick={() => setRotateSpeed(spd)}
+              style={{
+                ...s.btn,
+                padding: "2px 6px",
+                fontSize: 10,
+                borderColor: rotateSpeed === spd ? "#E9C46A" : "#3d4555",
+                color:        rotateSpeed === spd ? "#E9C46A" : "#8b949e",
+                background:   rotateSpeed === spd ? "#E9C46A22" : "none",
+              }}
+            >
+              {spd}×
+            </button>
+          ))}
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Camera zoom */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => { isZooming ? setIsZooming(false) : startZoom(); }}
+            style={{ ...s.btn, borderColor: isZooming ? "#C8B6FF" : "#3d4555", color: isZooming ? "#C8B6FF" : "#8b949e", background: isZooming ? "#C8B6FF22" : "none" }}
+            title="Oscillating zoom in/out (20 s cycle)"
+          >
+            {isZooming ? "⏸ Zoom" : "⇱ Zoom"}
+          </button>
+          {[0.5, 1, 2].map((amp) => (
+            <button key={amp} onClick={() => setZoomAmp(amp)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomAmp === amp ? "#C8B6FF" : "#3d4555", color: zoomAmp === amp ? "#C8B6FF" : "#8b949e", background: zoomAmp === amp ? "#C8B6FF22" : "none" }}>
+              ±{amp}
+            </button>
+          ))}
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Tilt */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => { isTilting ? setIsTilting(false) : startTilt(); }}
+            style={{ ...s.btn, borderColor: isTilting ? "#FF6B9D" : "#3d4555", color: isTilting ? "#FF6B9D" : "#8b949e", background: isTilting ? "#FF6B9D22" : "none" }}
+            title="Oscillate camera pitch (15 s cycle)"
+          >
+            {isTilting ? "⏸ Tilt" : "⟂ Tilt"}
+          </button>
+          {[10, 20, 35].map((amp) => (
+            <button key={amp} onClick={() => setTiltAmp(amp)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: tiltAmp === amp ? "#FF6B9D" : "#3d4555", color: tiltAmp === amp ? "#FF6B9D" : "#8b949e", background: tiltAmp === amp ? "#FF6B9D22" : "none" }}>
+              ±{amp}°
+            </button>
+          ))}
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Flyover */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => { isFlyover ? stopFlyover() : startFlyover(); }}
+            style={{ ...s.btn, borderColor: isFlyover ? "#6BCB77" : "#3d4555", color: isFlyover ? "#6BCB77" : "#8b949e", background: isFlyover ? "#6BCB7722" : "none" }}
+            title="Orbit camera around scene centre (60 s cycle)"
+          >
+            {isFlyover ? "⏸ Flyover" : "◎ Flyover"}
+          </button>
+          {[75, 150, 400].map((r) => (
+            <button key={r} onClick={() => setFlyoverRadius(r)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: flyoverRadius === r ? "#6BCB77" : "#3d4555", color: flyoverRadius === r ? "#6BCB77" : "#8b949e", background: flyoverRadius === r ? "#6BCB7722" : "none" }}>
+              {r}m
+            </button>
+          ))}
+        </div>
+
+        <div style={s.sep} />
+
+        {/* Map style */}
+        <select value={mapStyleId} onChange={(e) => setMapStyleId(e.target.value)} style={s.select}>
+          {MAP_STYLES.map((ms) => <option key={ms.id} value={ms.id}>{ms.name}</option>)}
+        </select>
+      </div>
+
+      {/* ── Map ── */}
+      <div style={{ position: "relative", flex: 1, minHeight: 300, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }}>
+        <DeckGL
+          viewState={viewState}
+          onViewStateChange={handleViewStateChange}
+          controller={true}
+          layers={layers}
+          getTooltip={getTooltip}
+        >
+          <Map
+            key={mapStyleId}
+            mapStyle={resolveStyle(MAP_STYLES.find((ms) => ms.id === mapStyleId).url)}
+            mapboxAccessToken={MAPBOX_TOKEN}
+          />
+        </DeckGL>
+
+        {loading && <div style={s.overlay}>Loading degree hours…</div>}
+
+        {!loading && selectedFields.length === 0 && (
+          <div style={s.overlay}>Select a field above to visualise.</div>
+        )}
+
+        {/* Legend */}
+        {!loading && selectedFields.length > 0 && (
+          <div style={s.legend}>
+            <div style={{ fontSize: 10, color: "#8b949e", marginBottom: 4 }}>
+              {selectedFields.map((f) => FIELD_META[f]?.label ?? f).join(" · ")}
+              {activeCutoff !== null && (
+                <span style={{ color: "#f85149" }}> · cutoff {activeCutoff}</span>
+              )}
+            </div>
+            {/* Color bar */}
+            <div style={{
+              width: 140, height: 10, borderRadius: 3,
+              background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})`,
+            }} />
+            <div style={{ display: "flex", justifyContent: "space-between", width: 140, marginTop: 2, fontSize: 10, color: "#8b949e" }}>
+              <span>0</span>
+              <span>{Math.round(maxValue / 2).toLocaleString()}</span>
+              <span>{Math.round(maxValue).toLocaleString()}</span>
+            </div>
+            <div style={{ marginTop: 5, fontSize: 10, color: "#8b949e" }}>
+              Max height: {Math.round(40 * heightScale)} m
+            </div>
+            {selectedFields.length > 1 && (
+              <div style={{ marginTop: 5, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {selectedFields.map((f, i) => (
+                  <span key={f} style={{ fontSize: 10, color: FIELD_COLORS[i % FIELD_COLORS.length], fontWeight: 700 }}>
+                    ▪ {FIELD_META[f]?.label ?? f}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ fontSize: 11, color: "#556677" }}>
+        Pre-calculated summer degree-hours per sensor.
+        {activeCutoff !== null && ` Outlier filter active: hiding sensors above ${activeCutoff} — color scale recalculated from remaining data.`}
+        {selectedFields.length > 1 && " Multiple fields shown side-by-side (offset East)."}
+      </div>
+    </div>
+  );
+}
+
+// ─── Styles ──────────────────────────────────────────────────────
+const styles = {
+  controlBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    padding: "8px 12px",
+    background: "#161b22",
+    border: "1px solid #2e3440",
+    borderRadius: 8,
+  },
+  controlGroup: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+  },
+  label: {
+    fontSize: 10,
+    color: "#8b949e",
+    whiteSpace: "nowrap",
+  },
+  sep: {
+    width: 1,
+    height: 20,
+    background: "#2e3440",
+    flexShrink: 0,
+  },
+  btn: {
+    background: "none",
+    border: "1px solid #3d4555",
+    borderRadius: 5,
+    color: "#8b949e",
+    cursor: "pointer",
+    fontSize: 11,
+    padding: "3px 9px",
+    fontFamily: "monospace",
+    lineHeight: 1.4,
+  },
+  select: {
+    background: "#161b22",
+    border: "1px solid #3d4555",
+    borderRadius: 5,
+    color: "#c9d1d9",
+    cursor: "pointer",
+    fontFamily: "monospace",
+    fontSize: 11,
+    padding: "3px 8px",
+    outline: "none",
+  },
+  numInput: {
+    background: "#1a1f2e",
+    border: "1px solid #3d4555",
+    borderRadius: 4,
+    color: "#c9d1d9",
+    fontFamily: "monospace",
+    fontSize: 11,
+    padding: "2px 6px",
+    outline: "none",
+    width: 60,
+  },
+  overlay: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%,-50%)",
+    background: "rgba(22,27,34,0.88)",
+    backdropFilter: "blur(6px)",
+    border: "1px solid #3d4555",
+    borderRadius: 8,
+    padding: "12px 24px",
+    fontFamily: "monospace",
+    fontSize: 13,
+    color: "#c9d1d9",
+    zIndex: 10,
+    pointerEvents: "none",
+  },
+  legend: {
+    position: "absolute",
+    bottom: 28,
+    left: 12,
+    zIndex: 5,
+    background: "rgba(22,27,34,0.88)",
+    backdropFilter: "blur(4px)",
+    border: "1px solid #2e3440",
+    borderRadius: 7,
+    padding: "8px 12px",
+    fontFamily: "monospace",
+    pointerEvents: "none",
+  },
+};
