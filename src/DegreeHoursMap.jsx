@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import DeckGL from "@deck.gl/react";
 import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
-import { WebMercatorViewport, LinearInterpolator } from "@deck.gl/core";
+import { WebMercatorViewport } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 
 
@@ -119,16 +119,32 @@ export default function DegreeHoursMap({ metadataData }) {
   const [isZoomOut, setIsZoomOut]           = useState(false);
   const [zoomOutFactor, setZoomOutFactor]   = useState(3);
   const [zoomOutDuration, setZoomOutDuration] = useState(8000);
-  const animFrameRef   = useRef(null);
-  const lastTimeRef    = useRef(null);
-  const elapsedRef     = useRef(0);
-  const zoomBaseRef    = useRef(null);
-  const pitchBaseRef   = useRef(null);
-  const sweepElapsed   = useRef(0);
-  const zoomInStart    = useRef(null);
-  const zoomInElapsed  = useRef(0);
-  const zoomOutStart   = useRef(null);
-  const zoomOutElapsed = useRef(0);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  // Live refs so applyCue can read current values without being in the dep array
+  const isRotatingRef  = useRef(isRotating);
+  const isTiltingRef   = useRef(isTilting);
+  const isSweepingRef  = useRef(isSweeping);
+  const isFlyoverRef   = useRef(isFlyover);
+  const viewStateRef   = useRef(viewState);
+  isRotatingRef.current = isRotating;
+  isTiltingRef.current  = isTilting;
+  isSweepingRef.current = isSweeping;
+  isFlyoverRef.current  = isFlyover;
+  viewStateRef.current  = viewState;
+
+  const animFrameRef      = useRef(null);
+  const lastTimeRef       = useRef(null);
+  const elapsedRef        = useRef(0);
+  const zoomBaseRef       = useRef(null);
+  const pitchBaseRef      = useRef(null);
+  const sweepElapsed      = useRef(0);
+  const zoomInStart       = useRef(null);
+  const zoomInElapsed     = useRef(0);
+  const zoomOutStart      = useRef(null);
+  const zoomOutElapsed    = useRef(0);
+  // Manual RAF-based cue transition (replaces deck.gl transitionInterpolator)
+  // { from:{lon,lat,zoom,pitch,bearing}, to:{…}, durMs, elapsed }
+  const cueTransitionRef  = useRef(null);
 
   // ── Sequencer ──
   const [cues, setCues]                   = useState([]);
@@ -215,7 +231,7 @@ export default function DegreeHoursMap({ metadataData }) {
   }, [fieldCache, selectedFields]);
 
   // Single animation loop — all animations run in parallel
-  const isAnimating = isRotating || isZooming || isTilting || isSweeping || isFlyover || isZoomIn || isZoomOut;
+  const isAnimating = isRotating || isZooming || isTilting || isSweeping || isFlyover || isZoomIn || isZoomOut || isTransitioning;
   useEffect(() => {
     if (!isAnimating) {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
@@ -228,6 +244,11 @@ export default function DegreeHoursMap({ metadataData }) {
     const LON_PER_M = 1 / 59400;
     const LAT_PER_M = 1 / 111000;
 
+    // Smoothstep easing for cue transitions
+    const ease = (t) => t * t * (3 - 2 * t);
+    // Shortest-path bearing lerp
+    const lerpBear = (a, b, t) => a + (((b - a + 540) % 360) - 180) * t;
+
     const step = (timestamp) => {
       if (lastTimeRef.current !== null) {
         const dt = timestamp - lastTimeRef.current;
@@ -236,64 +257,91 @@ export default function DegreeHoursMap({ metadataData }) {
         if (isZoomIn)   zoomInElapsed.current  += dt;
         if (isZoomOut)  zoomOutElapsed.current += dt;
 
+        // Advance cue transition outside the functional update (side-effect is fine for a ref)
+        const tr = cueTransitionRef.current;
+        let trT = 1;
+        if (tr) {
+          tr.elapsed += dt;
+          trT = Math.min(1, tr.elapsed / tr.durMs);
+        }
+        const trDone = tr && trT >= 1;
+
         let sweepDone = false;
         let zoomInDone = false;
         let zoomOutDone = false;
 
         setViewState((vs) => {
-          // ── Capture base values on first frame ──
-          if (isZooming  && zoomBaseRef.current   === null) zoomBaseRef.current   = vs.zoom;
-          if (isZoomIn   && zoomInStart.current   === null) zoomInStart.current   = vs.zoom;
-          if (isZoomOut  && zoomOutStart.current  === null) zoomOutStart.current  = vs.zoom;
-          if (isTilting  && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
-          if (isSweeping && pitchBaseRef.current === null) pitchBaseRef.current = vs.pitch;
+          // ── Cue transition: lerp axes that aren't animation-controlled ──
+          let base = vs;
+          if (tr) {
+            const e = ease(trT);
+            base = {
+              ...vs,
+              // Position always transitions (even with flyover, inherited target = current pos)
+              longitude: tr.from.longitude + (tr.to.longitude - tr.from.longitude) * e,
+              latitude:  tr.from.latitude  + (tr.to.latitude  - tr.from.latitude)  * e,
+              // Only lerp zoom/pitch/bearing when no animation owns that axis
+              ...(!isZooming && !isZoomIn && !isZoomOut
+                ? { zoom: tr.from.zoom + (tr.to.zoom - tr.from.zoom) * e } : {}),
+              ...(!isTilting && !isSweeping
+                ? { pitch: tr.from.pitch + (tr.to.pitch - tr.from.pitch) * e } : {}),
+              ...(!isRotating
+                ? { bearing: lerpBear(tr.from.bearing, tr.to.bearing, e) } : {}),
+            };
+          }
+
+          // ── Capture base values on first frame of each animation ──
+          if (isZooming  && zoomBaseRef.current  === null) zoomBaseRef.current  = base.zoom;
+          if (isZoomIn   && zoomInStart.current  === null) zoomInStart.current  = base.zoom;
+          if (isZoomOut  && zoomOutStart.current === null) zoomOutStart.current = base.zoom;
+          if (isTilting  && pitchBaseRef.current === null) pitchBaseRef.current = base.pitch;
+          if (isSweeping && pitchBaseRef.current === null) pitchBaseRef.current = base.pitch;
 
           // ── Rotation ──
           const bearing = isRotating
-            ? (vs.bearing + rotateSpeed * (dt / 1000)) % 360
-            : vs.bearing;
+            ? (base.bearing + rotateSpeed * (dt / 1000)) % 360
+            : base.bearing;
 
           // ── Zoom ──
-          let zoom = vs.zoom;
+          let zoom = base.zoom;
           if (isZooming) {
-            zoom = (zoomBaseRef.current ?? vs.zoom) +
+            zoom = (zoomBaseRef.current ?? base.zoom) +
               zoomAmp * Math.sin((2 * Math.PI * elapsedRef.current) / ZOOM_PERIOD_MS);
           } else if (isZoomIn) {
             const t = Math.min(1, zoomInElapsed.current / zoomInDuration);
-            zoom = (zoomInStart.current ?? vs.zoom) + Math.log2(zoomInFactor) * t;
+            zoom = (zoomInStart.current ?? base.zoom) + Math.log2(zoomInFactor) * t;
             if (t >= 1) zoomInDone = true;
           } else if (isZoomOut) {
             const t = Math.min(1, zoomOutElapsed.current / zoomOutDuration);
-            zoom = (zoomOutStart.current ?? vs.zoom) - Math.log2(zoomOutFactor) * t;
+            zoom = (zoomOutStart.current ?? base.zoom) - Math.log2(zoomOutFactor) * t;
             if (t >= 1) zoomOutDone = true;
           }
 
-          // ── Tilt (oscillate) ──
-          let pitch = vs.pitch;
+          // ── Tilt / Sweep ──
+          let pitch = base.pitch;
           if (isTilting) {
             pitch = Math.max(0, Math.min(80,
-              (pitchBaseRef.current ?? vs.pitch) +
+              (pitchBaseRef.current ?? base.pitch) +
               tiltAmp * Math.sin((2 * Math.PI * elapsedRef.current) / TILT_PERIOD_MS)
             ));
           } else if (isSweeping) {
-            // One-way linear sweep from current pitch → sweepTarget
             const t = Math.min(1, sweepElapsed.current / sweepDuration);
-            const start = pitchBaseRef.current ?? vs.pitch;
+            const start = pitchBaseRef.current ?? base.pitch;
             pitch = start + (sweepTarget - start) * t;
             if (t >= 1) sweepDone = true;
           }
 
-          // ── Flyover: straight-line travel in bearing direction ──
-          let longitude = vs.longitude;
-          let latitude  = vs.latitude;
+          // ── Flyover ──
+          let longitude = base.longitude;
+          let latitude  = base.latitude;
           if (isFlyover) {
-            const bearingRad = (vs.bearing * Math.PI) / 180;
+            const bearingRad = (base.bearing * Math.PI) / 180;
             const distMetres = flyoverSpeed * (dt / 1000);
             longitude += distMetres * LON_PER_M * Math.sin(bearingRad);
             latitude  += distMetres * LAT_PER_M * Math.cos(bearingRad);
           }
 
-          return { ...vs, bearing, zoom, pitch, longitude, latitude };
+          return { ...base, bearing, zoom, pitch, longitude, latitude };
         });
 
         if (sweepDone) {
@@ -311,13 +359,17 @@ export default function DegreeHoursMap({ metadataData }) {
           zoomOutStart.current   = null;
           zoomOutElapsed.current = 0;
         }
+        if (trDone) {
+          cueTransitionRef.current = null;
+          setIsTransitioning(false);
+        }
       }
       lastTimeRef.current = timestamp;
       animFrameRef.current = requestAnimationFrame(step);
     };
     animFrameRef.current = requestAnimationFrame(step);
     return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [isAnimating, isRotating, isZooming, isTilting, isSweeping, isFlyover, isZoomIn, isZoomOut,
+  }, [isAnimating, isRotating, isZooming, isTilting, isSweeping, isFlyover, isZoomIn, isZoomOut, isTransitioning,
       rotateSpeed, zoomAmp, tiltAmp, sweepTarget, sweepDuration, flyoverSpeed,
       zoomInFactor, zoomInDuration, zoomOutFactor, zoomOutDuration]);
 
@@ -348,55 +400,53 @@ export default function DegreeHoursMap({ metadataData }) {
        isFlyover, flyoverSpeed, viewState]);
 
   const applyCue = useCallback((cue) => {
-    // Cancel any pending transition timer
     if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
 
-    // Reset one-way refs so they restart cleanly
+    // Reset one-way animation refs so they capture a fresh start value
     zoomInStart.current = null;   zoomInElapsed.current = 0;
     zoomOutStart.current = null;  zoomOutElapsed.current = 0;
     pitchBaseRef.current = null;  sweepElapsed.current = 0;
 
-    // Stop all animations during the fly-to
-    setIsRotating(false); setIsZooming(false); setIsZoomIn(false);
-    setIsZoomOut(false);  setIsTilting(false);  setIsSweeping(false); setIsFlyover(false);
+    // Read live values from refs (keeps applyCue stable — no viewState in dep array)
+    const vs       = viewStateRef.current;
+    const rotating = isRotatingRef.current;
+    const tilting  = isTiltingRef.current;
+    const sweeping = isSweepingRef.current;
+    const flyover  = isFlyoverRef.current;
 
     const fadeMs = (cue.fade ?? 0) * 1000;
 
-    // Fly camera to saved position, inheriting live values for currently-animated axes
-    // so we don't snap bearing/pitch back to the recorded value mid-animation.
-    if (cue.view) {
-      const inheritedView = {
+    if (cue.view && fadeMs > 0) {
+      const to = {
         ...cue.view,
-        ...(isRotating  ? { bearing:   viewState.bearing   } : {}),
-        ...(isTilting || isSweeping ? { pitch: viewState.pitch } : {}),
-        ...(isFlyover   ? { longitude: viewState.longitude, latitude: viewState.latitude } : {}),
+        ...(rotating           ? { bearing:   vs.bearing   } : {}),
+        ...(tilting || sweeping ? { pitch:    vs.pitch     } : {}),
+        ...(flyover            ? { longitude: vs.longitude,
+                                   latitude:  vs.latitude  } : {}),
       };
-      setViewState({
-        ...inheritedView,
-        ...(fadeMs > 0 ? {
-          transitionDuration: fadeMs,
-          transitionInterpolator: new LinearInterpolator(['longitude', 'latitude', 'zoom', 'bearing', 'pitch']),
-        } : {}),
-      });
+      cueTransitionRef.current = {
+        from: {
+          longitude: vs.longitude, latitude: vs.latitude,
+          zoom: vs.zoom, pitch: vs.pitch, bearing: vs.bearing,
+        },
+        to,
+        durMs: fadeMs,
+        elapsed: 0,
+      };
+      setIsTransitioning(true);
+    } else if (cue.view) {
+      setViewState((s) => ({ ...s, ...cue.view }));
     }
 
-    // Start cue animations after the fly-to completes
-    const startAnims = () => {
-      setIsRotating(cue.rotate);      setRotateSpeed(cue.rotateSpeed);
-      setIsZooming(cue.zoom);         setZoomAmp(cue.zoomAmp);
-      setIsZoomIn(cue.zoomIn);        setZoomInFactor(cue.zoomInFactor);   setZoomInDuration(cue.zoomInDuration);
-      setIsZoomOut(cue.zoomOut);      setZoomOutFactor(cue.zoomOutFactor); setZoomOutDuration(cue.zoomOutDuration);
-      setIsTilting(cue.tilt);         setTiltAmp(cue.tiltAmp);
-      setIsSweeping(cue.sweep);       setSweepTarget(cue.sweepTarget);     setSweepDuration(cue.sweepDuration);
-      setIsFlyover(cue.flyover);      setFlyoverSpeed(cue.flyoverSpeed);
-    };
-
-    if (fadeMs > 0) {
-      transitionTimerRef.current = setTimeout(startAnims, fadeMs);
-    } else {
-      startAnims();
-    }
-  }, [isRotating, isTilting, isSweeping, isFlyover, viewState]);
+    // Start animations immediately (run concurrently with the transition)
+    setIsRotating(cue.rotate);      setRotateSpeed(cue.rotateSpeed);
+    setIsZooming(cue.zoom);         setZoomAmp(cue.zoomAmp);
+    setIsZoomIn(cue.zoomIn);        setZoomInFactor(cue.zoomInFactor);   setZoomInDuration(cue.zoomInDuration);
+    setIsZoomOut(cue.zoomOut);      setZoomOutFactor(cue.zoomOutFactor); setZoomOutDuration(cue.zoomOutDuration);
+    setIsTilting(cue.tilt);         setTiltAmp(cue.tiltAmp);
+    setIsSweeping(cue.sweep);       setSweepTarget(cue.sweepTarget);     setSweepDuration(cue.sweepDuration);
+    setIsFlyover(cue.flyover);      setFlyoverSpeed(cue.flyoverSpeed);
+  }, []); // stable — reads live state from refs, not closure
 
   const updateCue = useCallback(() => {
     if (activeCueIdx < 0) return;
@@ -477,7 +527,8 @@ export default function DegreeHoursMap({ metadataData }) {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     if (!sequencerAuto || activeCueIdx < 0) return;
     const cue = cues[activeCueIdx];
-    if (!cue || !cue.hold) return;
+    if (!cue || cue.hold == null) return;
+    const totalMs = ((cue.fade ?? 0) + cue.hold) * 1000;
     holdTimerRef.current = setTimeout(() => {
       const next = activeCueIdx + 1;
       if (next < cues.length) {
@@ -488,7 +539,7 @@ export default function DegreeHoursMap({ metadataData }) {
         setActiveCueIdx(-1);
         setSequencerAuto(false);
       }
-    }, cue.hold * 1000);
+    }, totalMs);
     return () => clearTimeout(holdTimerRef.current);
   }, [activeCueIdx, sequencerAuto, sequencerLoop, cues, goTo]);
 
@@ -630,9 +681,9 @@ export default function DegreeHoursMap({ metadataData }) {
                 const dLat = lat - cent.lat;
                 const dLon = lon - cent.lon;
                 const dist = Math.sqrt(dLat * dLat + dLon * dLon);
-                const desired = floor * leanScale;
                 const maxM = sp?.lean_max_m ?? 0;
-                const offsetM = maxM > 0 ? Math.min(desired, maxM) : desired;
+                if (maxM <= 0) return [lon + lonOffset, lat]; // no polygon data — skip lean
+                const offsetM = Math.min(floor * leanScale, maxM);
                 if (dist > 1e-9) {
                   lat += (dLat / dist) * offsetM * LAT_PER_M;
                   lon += (dLon / dist) * offsetM * LON_PER_M;
@@ -1055,9 +1106,6 @@ export default function DegreeHoursMap({ metadataData }) {
           <div style={s.legend}>
             <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
               {selectedFields.map((f) => FIELD_META[f]?.label ?? f).join(" · ")}
-              {activeCutoff !== null && (
-                <span style={{ color: "#f85149" }}> · cutoff {activeCutoff}</span>
-              )}
             </div>
             {/* Color bar */}
             <div style={{
@@ -1065,9 +1113,9 @@ export default function DegreeHoursMap({ metadataData }) {
               background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})`,
             }} />
             <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
-              <span>0</span>
-              <span>{Math.round(maxValue / 2).toLocaleString()}</span>
-              <span>{Math.round(maxValue).toLocaleString()}</span>
+              <span>0 °h</span>
+              <span>{Math.round(maxValue / 2).toLocaleString()} °h</span>
+              <span>{Math.round(maxValue).toLocaleString()} °h</span>
             </div>
             <div style={{ marginTop: 7, fontSize: 13, color: "#8b949e" }}>
               Max height: {Math.round(40 * heightScale)} m
