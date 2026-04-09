@@ -2,7 +2,44 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import DeckGL from "@deck.gl/react";
 import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
 import { WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
+import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import Map from "react-map-gl/mapbox";
+
+// ── Cylinder mesh for SimpleMeshLayer (axis=Z, base at z=0, height=1, radius=1) ──
+function makeCylinderMesh(N = 20) {
+  const pos = [];
+  const idx = [];
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    pos.push(Math.cos(a), Math.sin(a), 0); // bottom ring
+    pos.push(Math.cos(a), Math.sin(a), 1); // top ring
+  }
+  for (let i = 0; i < N; i++) {
+    const b0 = i * 2, t0 = b0 + 1, b1 = b0 + 2, t1 = b0 + 3;
+    idx.push(b0, b1, t0, b1, t1, t0); // side quads
+  }
+  const bC = pos.length / 3; pos.push(0, 0, 0); // bottom cap centre
+  for (let i = 0; i < N; i++) idx.push(bC, (i + 1) * 2, i * 2);
+  const tC = pos.length / 3; pos.push(0, 0, 1); // top cap centre
+  for (let i = 0; i < N; i++) idx.push(tC, i * 2 + 1, (i + 1) * 2 + 1);
+  return {
+    attributes: { positions: { value: new Float32Array(pos), size: 3 } },
+    indices: { value: new Uint32Array(idx), size: 1 },
+  };
+}
+const CYLINDER_MESH = makeCylinderMesh(20);
+
+// Build a column-major 4×4 transform: rotate Z-axis toward (lx,ly,0) by theta, then scale
+function leanTransform(lx, ly, theta, radius, height) {
+  const c = Math.cos(theta), s = Math.sin(theta), r = radius, h = height;
+  // Rodrigues rotation around axis (-ly, lx, 0) by theta, then scale columns by (r, r, h)
+  return [
+    (c + (1 - c) * ly * ly) * r,  -(1 - c) * lx * ly * r,  -s * lx * r,  0,
+    -(1 - c) * lx * ly * r,  (c + (1 - c) * lx * lx) * r,  -s * ly * r,  0,
+    s * lx * h,                    s * ly * h,                c * h,        0,
+    0,                             0,                         0,            1,
+  ];
+}
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 const API = "http://localhost:8000";
@@ -562,59 +599,83 @@ export default function DegreeHoursMap({ metadataData }) {
       // Filter outliers
       const visible = data.filter((d) => activeCutoff === null || d.value <= activeCutoff);
 
-      ls.push(
-        new ColumnLayer({
-          id: `dh-${field}`,
-          data: visible,
-          getPosition: (d) => {
-            const h = pointHeights[d.sensor_id];
-            const sp = spreadPositions[d.sensor_id];
+      if (explodedView) {
+        // ── Truly tilted cylinders via SimpleMeshLayer ──
+        ls.push(
+          new SimpleMeshLayer({
+            id: `dh-${field}`,
+            data: visible,
+            mesh: CYLINDER_MESH,
+            getPosition: (d) => {
+              const sp = spreadPositions[d.sensor_id];
+              const h = pointHeights[d.sensor_id];
+              const lat = sp?.spread_lat ?? h?.lat ?? d.lat;
+              const lon = sp?.spread_lon ?? h?.lon ?? d.lon;
+              return [lon + lonOffset, lat, 0];
+            },
+            getTransformMatrix: (d) => {
+              const h = pointHeights[d.sensor_id];
+              const sp = spreadPositions[d.sensor_id];
+              const cylH = Math.max(0.5, d.value * baseH * heightScale);
+              const floor = h?.floor ?? 0;
+              const vert = [radius, 0, 0, 0, 0, radius, 0, 0, 0, 0, cylH, 0, 0, 0, 0, 1];
 
-            // Base position: spread → parquet → raw
-            let lat, lon;
-            if (explodedView && sp?.spread_lat != null) {
-              lat = sp.spread_lat;
-              lon = sp.spread_lon;
-            } else {
-              lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
-              lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
-            }
+              if (!h?.lm_building_id || floor === 0 || leanScale === 0) return vert;
+              const cent = buildingCentroids[h.lm_building_id];
+              if (!cent) return vert;
 
-            // Lean outward from building centroid by floor × leanScale metres
-            if (explodedView && leanScale > 0 && h?.lm_building_id) {
-              const c = buildingCentroids[h.lm_building_id];
-              const floor = h.floor ?? 0;
-              if (c && floor > 0) {
-                const dLat = lat - c.lat;
-                const dLon = lon - c.lon;
-                const dist = Math.sqrt(dLat * dLat + dLon * dLon);
-                const offsetM = floor * leanScale;
-                if (dist > 1e-9) {
-                  lat += (dLat / dist) * offsetM * LAT_PER_M;
-                  lon += (dLon / dist) * offsetM * LON_PER_M;
-                } else {
-                  lat += offsetM * LAT_PER_M; // centroid fallback: nudge north
-                }
-              }
-            }
+              const baseLat = sp?.spread_lat ?? h?.lat ?? d.lat;
+              const baseLon = sp?.spread_lon ?? h?.lon ?? d.lon;
+              const lat_rad = baseLat * Math.PI / 180;
+              const dx = (baseLon - cent.lon) * Math.cos(lat_rad) * 111000;
+              const dy = (baseLat - cent.lat) * 111000;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const lx = dist > 0.01 ? dx / dist : 0;
+              const ly = dist > 0.01 ? dy / dist : 1;
 
-            return [lon + lonOffset, lat];
-          },
-          getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
-          getFillColor: (d) => [...dhToColor(d.value, maxValue), 230],
-          getLineColor: (d) => [...dhToColor(d.value, maxValue), 80],
-          radius,
-          diskResolution: 18,
-          extruded: true,
-          stroked: false,
-          pickable: true,
-          updateTriggers: {
-            getPosition:  [useParquetCoords, pointHeights, lonOffset, explodedView, spreadPositions, leanScale],
-            getElevation: [baseH, heightScale],
-            getFillColor: [maxValue],
-          },
-        })
-      );
+              const maxLeanM = sp?.lean_max_m ?? 0;
+              const effectiveLean = maxLeanM > 0
+                ? Math.min(floor * leanScale, maxLeanM)
+                : floor * leanScale;
+              const theta = Math.atan2(effectiveLean, cylH);
+              return leanTransform(lx, ly, theta, radius, cylH);
+            },
+            getColor: (d) => [...dhToColor(d.value, maxValue), 220],
+            pickable: true,
+            updateTriggers: {
+              getPosition:        [explodedView, spreadPositions, lonOffset],
+              getTransformMatrix: [baseH, heightScale, leanScale, spreadPositions, buildingCentroids, maxValue],
+              getColor:           [maxValue],
+            },
+          })
+        );
+      } else {
+        ls.push(
+          new ColumnLayer({
+            id: `dh-${field}`,
+            data: visible,
+            getPosition: (d) => {
+              const h = pointHeights[d.sensor_id];
+              const lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
+              const lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
+              return [lon + lonOffset, lat];
+            },
+            getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
+            getFillColor: (d) => [...dhToColor(d.value, maxValue), 230],
+            getLineColor: (d) => [...dhToColor(d.value, maxValue), 80],
+            radius,
+            diskResolution: 18,
+            extruded: true,
+            stroked: false,
+            pickable: true,
+            updateTriggers: {
+              getPosition:  [useParquetCoords, pointHeights, lonOffset],
+              getElevation: [baseH, heightScale],
+              getFillColor: [maxValue],
+            },
+          })
+        );
+      }
     });
 
     return ls;

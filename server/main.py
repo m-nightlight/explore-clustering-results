@@ -74,7 +74,8 @@ async def lifespan(app: FastAPI):
         sp = pd.read_parquet(SPREAD_POSITIONS_PARQUET)
         if sp.index.name != "sensor_id":
             sp = sp.set_index("sensor_id")
-        app.state.spread_positions = sp[["spread_lat", "spread_lon"]].to_dict("index")
+        cols = [c for c in ["spread_lat", "spread_lon", "lean_max_m"] if c in sp.columns]
+        app.state.spread_positions = sp[cols].to_dict("index")
         print(f"Loaded spread positions for {len(app.state.spread_positions)} sensors")
     except Exception as e:
         print(f"Warning: could not load spread positions parquet: {e}")
