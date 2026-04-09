@@ -43,9 +43,9 @@ const FIELD_META = {
   "dh_2018":       { label: "2018",      group: "year",      unit: "°Ch" },
   "dh_2024":       { label: "2024",      group: "year",      unit: "°Ch" },
   "dh_2025":       { label: "2025",      group: "year",      unit: "°Ch" },
-  "Kh above 26°C": { label: "Kh >26°C", group: "threshold", unit: "°Ch" },
-  "Kh above 27°C": { label: "Kh >27°C", group: "threshold", unit: "°Ch" },
-  "Kh above 28°C": { label: "Kh >28°C", group: "threshold", unit: "°Ch" },
+  "Kh above 26°C": { label: "Degree hours above 26°C", group: "threshold", unit: "°h" },
+  "Kh above 27°C": { label: "Degree hours above 27°C", group: "threshold", unit: "°h" },
+  "Kh above 28°C": { label: "Degree hours above 28°C", group: "threshold", unit: "°h" },
   "tc_h":          { label: "tc_h",      group: "other",     unit: "h"   },
 };
 
@@ -153,6 +153,7 @@ export default function DegreeHoursMap({ metadataData }) {
   const [sequencerLoop, setSequencerLoop] = useState(false);
   const [showSequencer, setShowSequencer] = useState(false);
   const [presentMode, setPresentMode]     = useState(false);
+  const [widescreen, setWidescreen]       = useState(false);
   const holdTimerRef                      = useRef(null);
   const transitionTimerRef                = useRef(null);
 
@@ -392,7 +393,8 @@ export default function DegreeHoursMap({ metadataData }) {
     flyover: isFlyover,   flyoverSpeed,
     hold: 5,              // seconds to wait before auto-advance
     fade: 2,              // seconds for fly-to transition
-    view: { ...viewState },             // camera position snapshot
+    view: { longitude: viewState.longitude, latitude: viewState.latitude,
+             zoom: viewState.zoom, pitch: viewState.pitch, bearing: viewState.bearing },
   }), [isRotating, rotateSpeed, isZooming, zoomAmp,
        isZoomIn, zoomInFactor, zoomInDuration,
        isZoomOut, zoomOutFactor, zoomOutDuration,
@@ -457,6 +459,15 @@ export default function DegreeHoursMap({ metadataData }) {
     ));
   }, [activeCueIdx, captureState]);
 
+  const mergeView = useCallback(() => {
+    if (activeCueIdx < 0) return;
+    const vs = viewStateRef.current;
+    setCues((prev) => prev.map((c, i) => i === activeCueIdx
+      ? { ...c, view: { longitude: vs.longitude, latitude: vs.latitude, zoom: vs.zoom, pitch: vs.pitch, bearing: vs.bearing } }
+      : c
+    ));
+  }, [activeCueIdx]);
+
   const [cueMsg, setCueMsg] = useState('');
   const _flashMsg = (msg) => { setCueMsg(msg); setTimeout(() => setCueMsg(''), 2500); };
 
@@ -513,13 +524,14 @@ export default function DegreeHoursMap({ metadataData }) {
     setShowSequencer(true);
   }, [captureState]);
 
+  const cuesRef = useRef(cues);
+  cuesRef.current = cues;
+
   const goTo = useCallback((idx) => {
-    setCues((prev) => {
-      if (idx < 0 || idx >= prev.length) return prev;
-      applyCue(prev[idx]);
-      setActiveCueIdx(idx);
-      return prev;
-    });
+    const current = cuesRef.current;
+    if (idx < 0 || idx >= current.length) return;
+    applyCue(current[idx]);
+    setActiveCueIdx(idx);
   }, [applyCue]);
 
   // Auto-advance hold timer
@@ -1069,9 +1081,20 @@ export default function DegreeHoursMap({ metadataData }) {
           title="Update the active cue with current view and animation state">
           ⟳ Update cue
         </button>
+        <button onClick={mergeView}
+          disabled={activeCueIdx < 0}
+          style={{ ...s.btn, borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}
+          title="Merge current viewport into the active cue, keeping all animation settings">
+          ⤵ Merge view
+        </button>
 
         <div style={s.sep} />
 
+        <button onClick={() => setWidescreen((w) => !w)}
+          style={{ ...s.btn, borderColor: widescreen ? "#C8B6FF" : "#3d4555", color: widescreen ? "#C8B6FF" : "#8b949e", background: widescreen ? "#C8B6FF22" : "none" }}
+          title="Toggle 16:9 map aspect ratio">
+          ▬ 16:9
+        </button>
         <button onClick={() => setPresentMode(true)}
           style={{ ...s.btn, borderColor: "#C8B6FF", color: "#C8B6FF" }}
           title="Hide controls for screen recording">
@@ -1079,12 +1102,40 @@ export default function DegreeHoursMap({ metadataData }) {
         </button>
       </div>}
 
-      {/* ── Map ── */}
-      <div style={{ position: "relative", flex: 1, minHeight: 300, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }}>
+      {/* ── Present mode controls bar ── */}
+      {presentMode && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button
+            onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
+            disabled={cues.length === 0}
+            style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
+            Go ▶
+          </button>
+          <button
+            onClick={() => setSequencerAuto((v) => !v)}
+            style={{ ...s.presentBtn, borderColor: sequencerAuto ? "#6BCB77" : "#556677", color: sequencerAuto ? "#6BCB77" : "#8b949e" }}>
+            {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
+          </button>
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={() => setPresentMode(false)}
+            style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>
+            ✕ Exit
+          </button>
+        </div>
+      )}
+
+      {/* ── Map (+ side sequencer in 16:9 mode) ── */}
+      <div style={widescreen && !presentMode && showSequencer
+        ? { display: "flex", flexDirection: "row", gap: 10, alignItems: "flex-start" }
+        : {}}>
+      <div style={widescreen
+        ? { position: "relative", flexShrink: 0, width: presentMode ? "calc(85vh * 16 / 9)" : "calc(55vh * 16 / 9)", aspectRatio: "16/9", borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }
+        : { position: "relative", flex: 1, minHeight: 300, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }}>
         <DeckGL
           viewState={viewState}
           onViewStateChange={handleViewStateChange}
-          controller={true}
+          controller={{ maxPitch: 85 }}
           layers={layers}
           getTooltip={getTooltip}
         >
@@ -1104,9 +1155,11 @@ export default function DegreeHoursMap({ metadataData }) {
         {/* Legend */}
         {!loading && selectedFields.length > 0 && (
           <div style={s.legend}>
-            <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
-              {selectedFields.map((f) => FIELD_META[f]?.label ?? f).join(" · ")}
-            </div>
+            {selectedFields.length === 1 && (
+              <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
+                {FIELD_META[selectedFields[0]]?.label ?? selectedFields[0]}
+              </div>
+            )}
             {/* Color bar */}
             <div style={{
               width: 210, height: 14, borderRadius: 4,
@@ -1117,9 +1170,7 @@ export default function DegreeHoursMap({ metadataData }) {
               <span>{Math.round(maxValue / 2).toLocaleString()} °h</span>
               <span>{Math.round(maxValue).toLocaleString()} °h</span>
             </div>
-            <div style={{ marginTop: 7, fontSize: 13, color: "#8b949e" }}>
-              Max height: {Math.round(40 * heightScale)} m
-            </div>
+
             {selectedFields.length > 1 && (
               <div style={{ marginTop: 7, display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {selectedFields.map((f, i) => (
@@ -1132,80 +1183,68 @@ export default function DegreeHoursMap({ metadataData }) {
           </div>
         )}
 
-        {/* Present mode overlay controls */}
-        {presentMode && (
-          <div style={{ position: "absolute", top: 10, right: 10, zIndex: 20, display: "flex", gap: 5 }}>
-            <button
-              onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
-              disabled={cues.length === 0}
-              style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
-              Go ▶
-            </button>
-            <button
-              onClick={() => setSequencerAuto((v) => !v)}
-              style={{ ...s.presentBtn, borderColor: sequencerAuto ? "#6BCB77" : "#556677", color: sequencerAuto ? "#6BCB77" : "#8b949e" }}>
-              {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
-            </button>
-            <button
-              onClick={() => setPresentMode(false)}
-              style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>
-              ✕ Exit
-            </button>
-          </div>
-        )}
-      </div>
+      </div>{/* ── end map container ── */}
 
-      {/* ── Sequencer Panel ── */}
-      {!presentMode && showSequencer && (
+      {/* ── Sequencer Panel — right of map in 16:9 mode ── */}
+      {!presentMode && showSequencer && widescreen && (
+        <div style={{ ...s.sequencerPanel, flex: 1, minWidth: 280, maxWidth: 420, alignSelf: "stretch", overflowY: "auto", maxHeight: "55vh" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
+            <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700, marginRight: "auto" }}>⬡ Cue List</span>
+            {cueMsg && <span style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace", width: "100%" }}>{cueMsg}</span>}
+            <button onClick={saveCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}>💾</button>
+            <button onClick={loadCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}>📂</button>
+            <button onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }} disabled={activeCueIdx <= 0} style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀</button>
+            <button onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }} disabled={cues.length === 0} style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</button>
+            <button onClick={() => setSequencerAuto((v) => !v)} style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>{sequencerAuto ? "⏸" : "▷"}</button>
+            <button onClick={() => setSequencerLoop((v) => !v)} style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }}>↺</button>
+          </div>
+          {cues.length === 0 && <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>No cues yet</div>}
+          {cues.map((cue, idx) => {
+            const isActive = idx === activeCueIdx;
+            const anims = [];
+            if (cue.rotate)  anims.push(`↻ ${cue.rotateSpeed}°/s`);
+            if (cue.zoom)    anims.push(`⇱ ±${cue.zoomAmp}`);
+            if (cue.zoomIn)  anims.push(`⊕ ${cue.zoomInFactor}×`);
+            if (cue.zoomOut) anims.push(`⊖ ${cue.zoomOutFactor}×`);
+            if (cue.tilt)    anims.push(`⟂ ±${cue.tiltAmp}°`);
+            if (cue.sweep)   anims.push(`↓ ${cue.sweepTarget}°`);
+            if (cue.flyover) anims.push(`→ ${cue.flyoverSpeed}m/s`);
+            if (!anims.length) anims.push("—");
+            return (
+              <div key={cue.id} onClick={() => goTo(idx)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderRadius: 5, cursor: "pointer", background: isActive ? "#E9C46A18" : "transparent", border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`, marginBottom: 3 }}>
+                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 16, textAlign: "right" }}>{idx + 1}</span>
+                <input value={cue.label} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))} style={{ ...s.numInput, flex: 1, background: "transparent", border: "1px solid transparent" }} onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }} onBlur={(e) => { e.target.style.borderColor = "transparent"; }} />
+                <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap" }}>{anims.join(" ")}</span>
+                <span style={{ fontSize: 10, color: "#556677" }}>f</span>
+                <input type="number" min={0} step={0.5} value={cue.fade ?? 0} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 32 }} />
+                <span style={{ fontSize: 10, color: "#556677" }}>h</span>
+                <input type="number" min={0} value={cue.hold} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 32 }} />
+                <button disabled={idx === 0} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 4px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
+                <button disabled={idx === cues.length - 1} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 4px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
+                <button onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }} style={{ ...s.btn, padding: "1px 5px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      </div>{/* ── end row wrapper ── */}
+
+      {/* ── Sequencer Panel (normal flow, non-16:9) ── */}
+      {!presentMode && showSequencer && !widescreen && (
         <div style={s.sequencerPanel}>
           {/* Header */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
             <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700 }}>⬡ Cue List</span>
             <div style={{ flex: 1 }} />
             {cueMsg && <span style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace" }}>{cueMsg}</span>}
-            <button onClick={saveCues}
-              style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
-              title="Save cue list to browser storage">
-              💾 Save
-            </button>
-            <button onClick={loadCues}
-              style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
-              title="Load previously saved cue list">
-              📂 Load
-            </button>
-            <button
-              onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }}
-              disabled={activeCueIdx <= 0}
-              style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>
-              ◀ Back
-            </button>
-            <button
-              onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
-              disabled={cues.length === 0}
-              style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
-              Go ▶
-            </button>
-            <button
-              onClick={() => setSequencerAuto((v) => !v)}
-              style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>
-              {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
-            </button>
-            <button
-              onClick={() => setSequencerLoop((v) => !v)}
-              style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }}
-              title="Loop back to cue 1 after the last cue">
-              ↺ Loop
-            </button>
+            <button onClick={saveCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }} title="Save cue list">💾 Save</button>
+            <button onClick={loadCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }} title="Load cue list">📂 Load</button>
+            <button onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }} disabled={activeCueIdx <= 0} style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀ Back</button>
+            <button onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }} disabled={cues.length === 0} style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</button>
+            <button onClick={() => setSequencerAuto((v) => !v)} style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>{sequencerAuto ? "⏸ Auto" : "▷ Auto"}</button>
+            <button onClick={() => setSequencerLoop((v) => !v)} style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }} title="Loop">↺ Loop</button>
           </div>
-
-          {/* Empty state */}
-          {cues.length === 0 && (
-            <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>
-              No cues — click ⊕ Add cue to capture the current animation state
-            </div>
-          )}
-
-          {/* Cue rows */}
+          {cues.length === 0 && <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>No cues — click ⊕ Add cue to capture the current animation state</div>}
           {cues.map((cue, idx) => {
             const isActive = idx === activeCueIdx;
             const anims = [];
@@ -1218,63 +1257,19 @@ export default function DegreeHoursMap({ metadataData }) {
             if (cue.flyover) anims.push(`→ ${cue.flyoverSpeed}m/s`);
             if (!anims.length) anims.push("—");
             return (
-              <div key={cue.id} onClick={() => goTo(idx)} style={{
-                display: "flex", alignItems: "center", gap: 5,
-                padding: "4px 8px", borderRadius: 5, cursor: "pointer",
-                background: isActive ? "#E9C46A18" : "transparent",
-                border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`,
-                marginBottom: 3,
-              }}>
-                {/* Cue number */}
-                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 18, textAlign: "right" }}>
-                  {idx + 1}
-                </span>
-                {/* Label — editable */}
-                <input
-                  value={cue.label}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))}
-                  style={{ ...s.numInput, width: 76, background: "transparent", border: "1px solid transparent" }}
-                  onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }}
-                  onBlur={(e) => { e.target.style.borderColor = "transparent"; }}
-                />
-                {/* Animation summary */}
-                <span style={{ flex: 1, fontSize: 10, color: "#8b949e", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                  {anims.join("  ")}
-                </span>
-                {/* Fade time */}
+              <div key={cue.id} onClick={() => goTo(idx)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 8px", borderRadius: 5, cursor: "pointer", background: isActive ? "#E9C46A18" : "transparent", border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`, marginBottom: 3 }}>
+                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 18, textAlign: "right" }}>{idx + 1}</span>
+                <input value={cue.label} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))} style={{ ...s.numInput, width: 76, background: "transparent", border: "1px solid transparent" }} onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }} onBlur={(e) => { e.target.style.borderColor = "transparent"; }} />
+                <span style={{ flex: 1, fontSize: 10, color: "#8b949e", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{anims.join("  ")}</span>
                 <span style={{ fontSize: 10, color: "#556677" }}>fade</span>
-                <input
-                  type="number" min={0} step={0.5}
-                  value={cue.fade ?? 0}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))}
-                  style={{ ...s.numInput, width: 38 }}
-                />
+                <input type="number" min={0} step={0.5} value={cue.fade ?? 0} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 38 }} />
                 <span style={{ fontSize: 10, color: "#556677" }}>s</span>
-                {/* Hold time */}
                 <span style={{ fontSize: 10, color: "#556677", marginLeft: 3 }}>hold</span>
-                <input
-                  type="number" min={0}
-                  value={cue.hold}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))}
-                  style={{ ...s.numInput, width: 38 }}
-                />
+                <input type="number" min={0} value={cue.hold} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 38 }} />
                 <span style={{ fontSize: 10, color: "#556677" }}>s</span>
-                {/* Reorder */}
-                <button
-                  disabled={idx === 0}
-                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }}
-                  style={{ ...s.btn, padding: "1px 5px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
-                <button
-                  disabled={idx === cues.length - 1}
-                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }}
-                  style={{ ...s.btn, padding: "1px 5px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
-                {/* Delete */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }}
-                  style={{ ...s.btn, padding: "1px 6px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
+                <button disabled={idx === 0} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 5px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
+                <button disabled={idx === cues.length - 1} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 5px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
+                <button onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }} style={{ ...s.btn, padding: "1px 6px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
               </div>
             );
           })}
@@ -1391,7 +1386,7 @@ const styles = {
   },
   legend: {
     position: "absolute",
-    bottom: 28,
+    top: 12,
     left: 12,
     zIndex: 5,
     background: "rgba(22,27,34,0.88)",
