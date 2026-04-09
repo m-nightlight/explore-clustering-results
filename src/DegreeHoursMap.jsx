@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import DeckGL from "@deck.gl/react";
 import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
-import { WebMercatorViewport, FlyToInterpolator } from "@deck.gl/core";
+import { WebMercatorViewport, LinearInterpolator } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
 
 
@@ -362,13 +362,20 @@ export default function DegreeHoursMap({ metadataData }) {
 
     const fadeMs = (cue.fade ?? 0) * 1000;
 
-    // Fly camera to saved position
+    // Fly camera to saved position, inheriting live values for currently-animated axes
+    // so we don't snap bearing/pitch back to the recorded value mid-animation.
     if (cue.view) {
-      setViewState({
+      const inheritedView = {
         ...cue.view,
+        ...(isRotating  ? { bearing:   viewState.bearing   } : {}),
+        ...(isTilting || isSweeping ? { pitch: viewState.pitch } : {}),
+        ...(isFlyover   ? { longitude: viewState.longitude, latitude: viewState.latitude } : {}),
+      };
+      setViewState({
+        ...inheritedView,
         ...(fadeMs > 0 ? {
           transitionDuration: fadeMs,
-          transitionInterpolator: new FlyToInterpolator({ speed: 1.5 }),
+          transitionInterpolator: new LinearInterpolator(['longitude', 'latitude', 'zoom', 'bearing', 'pitch']),
         } : {}),
       });
     }
@@ -389,7 +396,7 @@ export default function DegreeHoursMap({ metadataData }) {
     } else {
       startAnims();
     }
-  }, []);
+  }, [isRotating, isTilting, isSweeping, isFlyover, viewState]);
 
   const updateCue = useCallback(() => {
     if (activeCueIdx < 0) return;
@@ -400,17 +407,52 @@ export default function DegreeHoursMap({ metadataData }) {
     ));
   }, [activeCueIdx, captureState]);
 
+  const [cueMsg, setCueMsg] = useState('');
+  const _flashMsg = (msg) => { setCueMsg(msg); setTimeout(() => setCueMsg(''), 2500); };
+
   const saveCues = useCallback(() => {
     try {
-      localStorage.setItem("dh-cues", JSON.stringify(cues));
-    } catch (e) { console.error("Save failed", e); }
+      const toSave = cues.map((c) => ({
+        ...c,
+        view: c.view ? {
+          longitude: c.view.longitude, latitude: c.view.latitude,
+          zoom: c.view.zoom, pitch: c.view.pitch, bearing: c.view.bearing,
+        } : undefined,
+      }));
+      const blob = new Blob([JSON.stringify(toSave, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dh-cues-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      _flashMsg(`✓ Saved ${cues.length} cue${cues.length !== 1 ? 's' : ''}`);
+    } catch (e) { console.error("Save failed", e); _flashMsg('✗ Save failed'); }
   }, [cues]);
 
   const loadCues = useCallback(() => {
-    try {
-      const saved = localStorage.getItem("dh-cues");
-      if (saved) { setCues(JSON.parse(saved)); setActiveCueIdx(-1); setShowSequencer(true); }
-    } catch (e) { console.error("Load failed", e); }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.target.result);
+          setCues(parsed);
+          setActiveCueIdx(-1);
+          setShowSequencer(true);
+          _flashMsg(`✓ Loaded ${parsed.length} cue${parsed.length !== 1 ? 's' : ''} from ${file.name}`);
+        } catch (err) {
+          console.error("Load failed", err);
+          _flashMsg('✗ Invalid file');
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
   }, []);
 
   const addCue = useCallback(() => {
@@ -1072,6 +1114,7 @@ export default function DegreeHoursMap({ metadataData }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
             <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700 }}>⬡ Cue List</span>
             <div style={{ flex: 1 }} />
+            {cueMsg && <span style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace" }}>{cueMsg}</span>}
             <button onClick={saveCues}
               style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
               title="Save cue list to browser storage">
