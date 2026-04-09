@@ -94,6 +94,12 @@ export default function DegreeHoursMap({ metadataData }) {
   const [useParquetCoords, setUseParquetCoords] = useState(true);
   const [pointHeights, setPointHeights]         = useState({});
 
+  // Exploded building view
+  const [explodedView, setExplodedView]         = useState(false);
+  const [leanScale, setLeanScale]               = useState(5);    // metres outward per floor
+  const [spreadPositions, setSpreadPositions]   = useState({});
+  const [spreadLoading, setSpreadLoading]       = useState(false);
+
   // Camera animation
   const [isRotating, setIsRotating]   = useState(false);
   const [rotateSpeed, setRotateSpeed] = useState(0.3);   // °/s
@@ -157,6 +163,14 @@ export default function DegreeHoursMap({ metadataData }) {
   useEffect(() => {
     fetchJson(`${API}/api/point-heights`).then(setPointHeights).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!explodedView || Object.keys(spreadPositions).length > 0 || spreadLoading) return;
+    setSpreadLoading(true);
+    fetchJson(`${API}/api/spread-positions`)
+      .then((d) => { setSpreadPositions(d); setSpreadLoading(false); })
+      .catch(() => setSpreadLoading(false));
+  }, [explodedView]);
 
   useEffect(() => {
     fetchJson(`${API}/api/all-buildings`).then(setBuildings3D).catch(() => {});
@@ -514,7 +528,30 @@ export default function DegreeHoursMap({ metadataData }) {
     }
 
     const LON_PER_M = 1 / 59400; // at ~57.7°N
+    const LAT_PER_M = 1 / 111000;
     const gap = radius * 2.5 + 2;
+
+    // Pre-compute building centroids for lean offset
+    const buildingCentroids = {};
+    if (explodedView) {
+      Object.entries(pointHeights).forEach(([sid, h]) => {
+        const bid = h.lm_building_id;
+        if (!bid) return;
+        if (!buildingCentroids[bid]) buildingCentroids[bid] = { sumLat: 0, sumLon: 0, n: 0 };
+        const sp = spreadPositions[sid];
+        const lat = (sp?.spread_lat != null) ? sp.spread_lat : h.lat;
+        const lon = (sp?.spread_lon != null) ? sp.spread_lon : h.lon;
+        if (lat != null && lon != null) {
+          buildingCentroids[bid].sumLat += lat;
+          buildingCentroids[bid].sumLon += lon;
+          buildingCentroids[bid].n++;
+        }
+      });
+      Object.values(buildingCentroids).forEach((c) => {
+        c.lat = c.sumLat / c.n;
+        c.lon = c.sumLon / c.n;
+      });
+    }
 
     selectedFields.forEach((field, idx) => {
       const data = fieldCache[field];
@@ -522,7 +559,7 @@ export default function DegreeHoursMap({ metadataData }) {
 
       const lonOffset = idx * gap * LON_PER_M;
 
-      // Filter outliers; build position array with parquet coords applied
+      // Filter outliers
       const visible = data.filter((d) => activeCutoff === null || d.value <= activeCutoff);
 
       ls.push(
@@ -531,8 +568,36 @@ export default function DegreeHoursMap({ metadataData }) {
           data: visible,
           getPosition: (d) => {
             const h = pointHeights[d.sensor_id];
-            const lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
-            const lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
+            const sp = spreadPositions[d.sensor_id];
+
+            // Base position: spread → parquet → raw
+            let lat, lon;
+            if (explodedView && sp?.spread_lat != null) {
+              lat = sp.spread_lat;
+              lon = sp.spread_lon;
+            } else {
+              lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
+              lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
+            }
+
+            // Lean outward from building centroid by floor × leanScale metres
+            if (explodedView && leanScale > 0 && h?.lm_building_id) {
+              const c = buildingCentroids[h.lm_building_id];
+              const floor = h.floor ?? 0;
+              if (c && floor > 0) {
+                const dLat = lat - c.lat;
+                const dLon = lon - c.lon;
+                const dist = Math.sqrt(dLat * dLat + dLon * dLon);
+                const offsetM = floor * leanScale;
+                if (dist > 1e-9) {
+                  lat += (dLat / dist) * offsetM * LAT_PER_M;
+                  lon += (dLon / dist) * offsetM * LON_PER_M;
+                } else {
+                  lat += offsetM * LAT_PER_M; // centroid fallback: nudge north
+                }
+              }
+            }
+
             return [lon + lonOffset, lat];
           },
           getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
@@ -544,7 +609,7 @@ export default function DegreeHoursMap({ metadataData }) {
           stroked: false,
           pickable: true,
           updateTriggers: {
-            getPosition:  [useParquetCoords, pointHeights, lonOffset],
+            getPosition:  [useParquetCoords, pointHeights, lonOffset, explodedView, spreadPositions, leanScale],
             getElevation: [baseH, heightScale],
             getFillColor: [maxValue],
           },
@@ -559,6 +624,7 @@ export default function DegreeHoursMap({ metadataData }) {
     heightScale, radius, maxValue, baseH,
     activeCutoff,
     useParquetCoords, pointHeights,
+    explodedView, spreadPositions, leanScale,
   ]);
 
   // ── Tooltip ──
@@ -741,6 +807,25 @@ export default function DegreeHoursMap({ metadataData }) {
         >
           ▦ Bldgs
         </button>
+
+        {/* Exploded building view */}
+        <div style={s.controlGroup}>
+          <button
+            onClick={() => setExplodedView((v) => !v)}
+            style={{
+              ...s.btn,
+              borderColor: explodedView ? "#FF6B9D" : "#3d4555",
+              color: explodedView ? "#FF6B9D" : "#8b949e",
+              background: explodedView ? "#FF6B9D22" : "none",
+            }}
+            title="Spread sensors evenly within building footprint and lean outward by floor">
+            {spreadLoading ? "⟳ Loading…" : "⬡ Explode"}
+          </button>
+          <span style={s.label}>lean {leanScale}m/fl</span>
+          <input type="range" min={0} max={20} step={0.5} value={leanScale}
+            onChange={(e) => setLeanScale(Number(e.target.value))}
+            style={{ width: 80, accentColor: "#FF6B9D", cursor: "pointer" }} />
+        </div>
 
         <div style={s.sep} />
 

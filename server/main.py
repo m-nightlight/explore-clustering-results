@@ -19,6 +19,10 @@ BUILDING_CLUSTERS_PARQUET = os.environ.get(
     "BUILDING_CLUSTERS_PARQUET",
     os.path.join(os.path.dirname(__file__), "..", "data", "meta_clusters_combined_building_level.parquet"),
 )
+SPREAD_POSITIONS_PARQUET = os.environ.get(
+    "SPREAD_POSITIONS_PARQUET",
+    os.path.join(os.path.dirname(__file__), "..", "data", "sensor_spread_positions.parquet"),
+)
 SMHI_MEASUREMENTS_DIR = os.environ.get(
     "SMHI_MEASUREMENTS_DIR",
     "/Users/matsp/phd-python-projects/SMHI-Climate-data-collector/data_cities/göteborg/measurements",
@@ -66,6 +70,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: could not load point heights from parquet: {e}")
         app.state.point_heights = {}
+    try:
+        sp = pd.read_parquet(SPREAD_POSITIONS_PARQUET)
+        if sp.index.name != "sensor_id":
+            sp = sp.set_index("sensor_id")
+        app.state.spread_positions = sp[["spread_lat", "spread_lon"]].to_dict("index")
+        print(f"Loaded spread positions for {len(app.state.spread_positions)} sensors")
+    except Exception as e:
+        print(f"Warning: could not load spread positions parquet: {e}")
+        app.state.spread_positions = {}
         app.state.building_osm_heights = {}
     try:
         bc_df = pd.read_parquet(BUILDING_CLUSTERS_PARQUET, columns=["combined_name", "building_cluster"])
@@ -753,6 +766,12 @@ async def get_filtered_sensor_ids(request: Request):
 async def get_point_heights(request: Request):
     """Return per-sensor floor + building height data from the parquet export."""
     return request.app.state.point_heights
+
+
+@app.get("/api/spread-positions")
+async def get_spread_positions(request: Request):
+    """Return pre-computed even-spread positions per sensor within building polygons."""
+    return request.app.state.spread_positions
 
 
 @app.get("/api/all-buildings")
