@@ -43,9 +43,9 @@ const FIELD_META = {
   "dh_2018":       { label: "2018",      group: "year",      unit: "°Ch" },
   "dh_2024":       { label: "2024",      group: "year",      unit: "°Ch" },
   "dh_2025":       { label: "2025",      group: "year",      unit: "°Ch" },
-  "Kh above 26°C": { label: "Degree hours above 26°C", group: "threshold", unit: "°h" },
-  "Kh above 27°C": { label: "Degree hours above 27°C", group: "threshold", unit: "°h" },
-  "Kh above 28°C": { label: "Degree hours above 28°C", group: "threshold", unit: "°h" },
+  "Kh above 26°C": { label: "Gradtimmar över 26°C", group: "threshold", unit: "°h" },
+  "Kh above 27°C": { label: "Gradtimmar över 27°C", group: "threshold", unit: "°h" },
+  "Kh above 28°C": { label: "Gradtimmar över 28°C", group: "threshold", unit: "°h" },
   "tc_h":          { label: "tc_h",      group: "other",     unit: "h"   },
 };
 
@@ -771,7 +771,7 @@ export default function DegreeHoursMap({ metadataData }) {
   const s = styles;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: presentMode ? "calc(100vh - 120px)" : "calc(100vh - 220px)", minHeight: 520 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, ...(presentMode ? { paddingBottom: 40 } : { height: "calc(100vh - 220px)", minHeight: 520 }) }}>
       {/* ── Controls row 1: field selection ── */}
       {!presentMode && <div style={s.controlBar}>
         {fieldGroups.year.length > 0 && (
@@ -1106,6 +1106,12 @@ export default function DegreeHoursMap({ metadataData }) {
       {presentMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <button
+            onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }}
+            disabled={activeCueIdx <= 0}
+            style={{ ...s.presentBtn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>
+            ◀ Back
+          </button>
+          <button
             onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
             disabled={cues.length === 0}
             style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
@@ -1116,7 +1122,24 @@ export default function DegreeHoursMap({ metadataData }) {
             style={{ ...s.presentBtn, borderColor: sequencerAuto ? "#6BCB77" : "#556677", color: sequencerAuto ? "#6BCB77" : "#8b949e" }}>
             {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
           </button>
+          <button
+            onClick={() => { setIsRotating(false); setIsZooming(false); setIsZoomIn(false); setIsZoomOut(false); setIsTilting(false); setIsSweeping(false); setIsFlyover(false); cueTransitionRef.current = null; setIsTransitioning(false); }}
+            style={{ ...s.presentBtn, borderColor: "#f85149", color: "#f85149" }}>
+            ⏹ Pause
+          </button>
           <div style={{ flex: 1 }} />
+          <button
+            onClick={() => goTo(0)}
+            disabled={cues.length === 0}
+            style={{ ...s.presentBtn, borderColor: "#8b949e", color: "#8b949e", opacity: cues.length === 0 ? 0.4 : 1 }}>
+            ⏮ Reset
+          </button>
+          <button
+            onClick={() => { goTo(0); setSequencerAuto(true); }}
+            disabled={cues.length === 0}
+            style={{ ...s.presentBtn, borderColor: "#4CC9F0", color: "#4CC9F0", opacity: cues.length === 0 ? 0.4 : 1 }}>
+            ↺ Replay
+          </button>
           <button
             onClick={() => setPresentMode(false)}
             style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>
