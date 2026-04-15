@@ -1939,6 +1939,8 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [boxZoomActive, setBoxZoomActive] = useState(false);
   const [boxRect, setBoxRect] = useState(null);
   const [mode3D, setMode3D] = useState(true);
+  const [buildingWireframe, setBuildingWireframe] = useState(false);
+  const [wireLineWidth, setWireLineWidth] = useState(1.5);
   const [useParquetCoords, setUseParquetCoords] = useState(true);
   const [colorByMetric, setColorByMetric] = useState(null);
   const [pointHeights, setPointHeights] = useState({});
@@ -2523,12 +2525,16 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       ls.push(new GeoJsonLayer({
         id: "buildings-3d-all",
         data: buildings3D,
-        filled: true,
-        stroked: false,
+        filled: !buildingWireframe,
+        stroked: buildingWireframe,
         extruded: true,
+        wireframe: buildingWireframe,
         getElevation: (f) => f.properties?.height ?? 10,
-        getFillColor: [100, 180, 255, 170],
+        getFillColor: buildingWireframe ? [100, 180, 255, 0] : [100, 180, 255, 170],
+        getLineColor: [255, 255, 255, 200],
+        lineWidthMinPixels: buildingWireframe ? wireLineWidth : 0,
         material: { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
+        updateTriggers: { getFillColor: [buildingWireframe], filled: [buildingWireframe] },
       }));
     }
     // Outdoor sensor temperature — one dot per sensor, colored by actual temperature
@@ -2569,20 +2575,21 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       ls.push(new GeoJsonLayer({
         id: "buildings",
         data: buildingGeometry,
-        filled: true,
+        filled: !(mode3D && buildingWireframe),
         stroked: true,
         extruded: mode3D,
+        wireframe: mode3D && buildingWireframe,
         getElevation: (f) => f.properties?.height ?? 10,
-        getFillColor: mode3D ? [88, 166, 255, 180] : [88, 166, 255, 25],
-        getLineColor: [88, 166, 255, 200],
-        lineWidthMinPixels: 1,
-        lineWidthMaxPixels: 2,
+        getFillColor: (mode3D && buildingWireframe) ? [88, 166, 255, 0] : mode3D ? [88, 166, 255, 180] : [88, 166, 255, 25],
+        getLineColor: (mode3D && buildingWireframe) ? [255, 255, 255, 200] : [88, 166, 255, 200],
+        lineWidthMinPixels: (mode3D && buildingWireframe) ? wireLineWidth : 1,
+        lineWidthMaxPixels: (mode3D && buildingWireframe) ? wireLineWidth * 2 : 2,
         material: mode3D ? { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] } : undefined,
-        updateTriggers: { extruded: [mode3D], getFillColor: [mode3D] },
+        updateTriggers: { extruded: [mode3D], getFillColor: [mode3D, buildingWireframe], wireframe: [mode3D, buildingWireframe] },
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, buildingWireframe, wireLineWidth, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -3247,6 +3254,22 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
             <button onClick={() => setShowSunArc(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showSunArc ? "#E9C46A" : "#3d4555", color: showSunArc ? "#E9C46A" : "#8b949e", background: showSunArc ? "#E9C46A22" : "none" }}>
               ☀ Sun arc
             </button>
+          )}
+          {mode3D && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button onClick={() => setBuildingWireframe(v => !v)} title="Toggle building wireframe" style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: buildingWireframe ? "#88AADD" : "#3d4555", color: buildingWireframe ? "#88AADD" : "#8b949e", background: buildingWireframe ? "#88AADD22" : "none" }}>
+                ⬡ Wire
+              </button>
+              {buildingWireframe && (
+                <input
+                  type="range" min={0.5} max={4} step={0.5}
+                  value={wireLineWidth}
+                  onChange={(e) => setWireLineWidth(parseFloat(e.target.value))}
+                  title={`Line width: ${wireLineWidth}px`}
+                  style={{ width: 54, accentColor: "#88AADD", cursor: "pointer" }}
+                />
+              )}
+            </div>
           )}
           <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
             ⌖ Parquet coords

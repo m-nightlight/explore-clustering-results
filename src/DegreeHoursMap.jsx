@@ -90,6 +90,7 @@ export default function DegreeHoursMap({ metadataData }) {
   const [heightScale, setHeightScale]         = useState(5);
   const [radius, setRadius]                   = useState(3);
   const [showBuildings, setShowBuildings]     = useState(true);
+  const [buildingWireframe, setBuildingWireframe] = useState(false);
 
   // Parquet coordinates
   const [useParquetCoords, setUseParquetCoords] = useState(true);
@@ -623,11 +624,14 @@ export default function DegreeHoursMap({ metadataData }) {
         new GeoJsonLayer({
           id: "dh-buildings",
           data: buildings3D,
-          filled: true,
-          stroked: false,
+          filled: !buildingWireframe,
+          stroked: buildingWireframe,
           extruded: true,
+          wireframe: buildingWireframe,
           getElevation: (f) => f.properties?.height ?? 10,
-          getFillColor: [55, 75, 110, 130],
+          getFillColor: buildingWireframe ? [80, 110, 160, 0] : [55, 75, 110, 130],
+          getLineColor: [100, 140, 220, 180],
+          lineWidthMinPixels: buildingWireframe ? 1 : 0,
           material: { ambient: 0.4, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
         })
       );
@@ -726,7 +730,7 @@ export default function DegreeHoursMap({ metadataData }) {
 
     return ls;
   }, [
-    showBuildings, buildings3D,
+    showBuildings, buildingWireframe, buildings3D,
     selectedFields, fieldCache,
     heightScale, radius, maxValue, baseH,
     activeCutoff,
@@ -914,6 +918,20 @@ export default function DegreeHoursMap({ metadataData }) {
         >
           ▦ Bldgs
         </button>
+        {showBuildings && (
+          <button
+            onClick={() => setBuildingWireframe((v) => !v)}
+            title="Toggle building wireframe / solid"
+            style={{
+              ...s.btn,
+              borderColor: buildingWireframe ? "#88AADD" : "#3d4555",
+              color: buildingWireframe ? "#88AADD" : "#8b949e",
+              background: buildingWireframe ? "#88AADD22" : "none",
+            }}
+          >
+            ⬡ Wire
+          </button>
+        )}
 
         {/* Exploded building view */}
         <div style={s.controlGroup}>
