@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
+import Papa from "papaparse";
 import DeckGL from "@deck.gl/react";
 import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
@@ -222,25 +223,32 @@ export default function App() {
 
   // ── Custom CSV cluster columns ──
   const parseClusterCSV = (text) => {
-    const lines = text.trim().split(/\r?\n/);
-    if (lines.length < 2) throw new Error("CSV must have a header and at least one data row");
-    const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
-    const nameIdx = headers.findIndex((h) => h.toLowerCase() === "combined_name");
-    if (nameIdx === -1) throw new Error('CSV must have a "combined_name" column');
-    const clusterIdx = headers.findIndex((_, i) => i !== nameIdx);
-    if (clusterIdx === -1) throw new Error("CSV must have at least two columns");
-    const colName = headers[clusterIdx];
+    const { data, errors, meta } = Papa.parse(text.trim(), {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+    });
+    if (errors.length > 0 && data.length === 0)
+      throw new Error(`CSV parse error: ${errors[0].message}`);
+
+    const headers = meta.fields ?? [];
+    const nameField = headers.find((h) => h.toLowerCase() === "combined_name");
+    if (!nameField) throw new Error('CSV must have a "combined_name" column');
+
+    const clusterField = headers.find((h) => h !== nameField);
+    if (!clusterField) throw new Error("CSV must have at least two columns");
+
     const mapping = {};
-    for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(",").map((p) => p.trim().replace(/^"|"$/g, ""));
-      const sensorId = parts[nameIdx];
-      const raw = parts[clusterIdx];
+    for (const row of data) {
+      const sensorId = row[nameField]?.trim();
+      const raw = row[clusterField]?.trim();
       if (sensorId && raw !== "" && raw != null) {
-        mapping[sensorId] = parseInt(raw, 10);
+        const n = parseInt(raw, 10);
+        if (!Number.isNaN(n)) mapping[sensorId] = n;
       }
     }
     if (Object.keys(mapping).length === 0) throw new Error("No valid rows found in CSV");
-    return { colName, mapping };
+    return { colName: clusterField, mapping };
   };
 
   const addCustomClusterCol = (colName, mapping) => {
@@ -1451,7 +1459,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(ids)}`)
       .then((r) => r.json())
       .then(setSensorData)
-      .catch(() => {});
+      .catch((e) => console.error("sensor-timeseries fetch failed:", e));
   }, [selectedSensors]);
 
   // Fetch ALL cluster profiles for drill-down (for stable y scale)
@@ -1469,7 +1477,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
     req
       .then((r) => r.json())
       .then(setAllDrillProfiles)
-      .catch(() => {});
+      .catch((e) => { if (e.name !== "AbortError") console.error("drill cluster-profiles fetch failed:", e); });
     return () => controller.abort();
   }, [selectedK, customColMapping]);
 
@@ -1487,7 +1495,7 @@ function TimeSeriesView({ selectedK, clusters, selectedClusters, sensorClusterMa
       )
         .then((r) => r.json())
         .then(setDrillSensorData)
-        .catch(() => {});
+        .catch((e) => { if (e.name !== "AbortError") console.error("drill sensor-timeseries fetch failed:", e); });
     }
     return () => controller.abort();
   }, [drillClusters, sensorList, sensorClusterMap]);
@@ -2002,7 +2010,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     req
       .then((r) => { if (r.ok) return r.json(); throw new Error(`HTTP ${r.status}`); })
       .then((d) => { if (d?.timestamps) setAllClusterProfiles(d); })
-      .catch(() => {});
+      .catch((e) => { if (e.name !== "AbortError") console.error("cluster-profiles fetch failed:", e); });
     return () => controller.abort();
   }, [selectedK, customClusterCols]);
 
@@ -2070,14 +2078,14 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   useEffect(() => {
-    fetchData("/api/filter-options").then(setFilterOptions).catch(() => {});
-    fetchData("/api/point-heights").then(setPointHeights).catch(() => {});
+    fetchData("/api/filter-options").then(setFilterOptions).catch((e) => console.error("filter-options fetch failed:", e));
+    fetchData("/api/point-heights").then(setPointHeights).catch((e) => console.error("point-heights fetch failed:", e));
   }, []);
 
   // Fetch all building footprints once when entering 3D mode
   useEffect(() => {
     if (!mode3D) { setBuildings3D(null); return; }
-    fetchData("/api/all-buildings").then(setBuildings3D).catch(() => {});
+    fetchData("/api/all-buildings").then(setBuildings3D).catch((e) => console.error("all-buildings fetch failed:", e));
   }, [mode3D]);
 
 
@@ -2089,7 +2097,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (minBuildingFloors > 0) params.set("min_building_floors", minBuildingFloors);
     fetchData(`/api/filtered-sensor-ids?${params}`)
       .then((d) => setFilteredIds(d.sensor_ids ? new Set(d.sensor_ids) : null))
-      .catch(() => {});
+      .catch((e) => console.error("filtered-sensor-ids fetch failed:", e));
   }, [activeFilters, minBuildingFloors]);
 
   const toggleFilterValue = (field, value) => {
@@ -2226,7 +2234,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
   useEffect(() => {
     fetchData("/api/outdoor-sensors")
       .then(setOutdoorSensors)
-      .catch(() => {});
+      .catch((e) => console.error("outdoor-sensors fetch failed:", e));
   }, []);
 
   // Fetch outdoor sensor timeseries (lazy — only when overlay or heatmap is enabled)
@@ -2237,7 +2245,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (outdoorTimeseries?._year === year) return;
     fetchData(`/api/outdoor-timeseries?year=${year}`)
       .then((d) => { if (d?.timestamps) setOutdoorTimeseries({ ...d, _year: year }); })
-      .catch(() => {});
+      .catch((e) => console.error("outdoor-timeseries fetch failed:", e));
   }, [allClusterProfiles, showOutdoorSensors, showHeatmap, outdoorTimeseries?._year]);
 
   // Fetch outdoor climate (temperature, humidity, station irradiance) for the data year.
@@ -2247,7 +2255,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     if (outdoorClimate?.year === year) return; // already loaded
     fetchData(`/api/outdoor-climate?year=${year}`)
       .then(setOutdoorClimate)
-      .catch(() => {});
+      .catch((e) => console.error("outdoor-climate fetch failed:", e));
   }, [allClusterProfiles, outdoorClimate?.year]);
 
   // Derive the Unix-ms timestamp for the sun from the loaded time series, or
@@ -2659,7 +2667,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
       fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(sampleIds.join(","))}`)
         .then((r) => r.json())
         .then((d) => { setMapSensorData(d); setMapProfilesLoading(false); })
-        .catch(() => setMapProfilesLoading(false));
+        .catch((e) => { console.error("map sensor-timeseries fetch failed:", e); setMapProfilesLoading(false); });
     else
       setMapProfilesLoading(false);
 
@@ -3063,7 +3071,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(ids.join(","))}`)
       .then((r) => r.json())
       .then(setBuildingTimeseries)
-      .catch(() => {});
+      .catch((e) => console.error("building sensor-timeseries fetch failed:", e));
   }, [selectedBuildings, sensorProperties]);
 
   // ── Building geometry fetch ──
@@ -3076,7 +3084,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
     })
       .then((r) => r.json())
       .then((data) => { if (data?.features) setBuildingGeometry(data); })
-      .catch(() => {});
+      .catch((e) => console.error("building-geometries fetch failed:", e));
   }, [selectedBuildings]);
 
   // ── Fly to building when geometry loads ──
@@ -3397,7 +3405,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                 fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(snapshotVisible.join(","))}`)
                   .then((r) => r.json())
                   .then(setBuildingTimeseries)
-                  .catch(() => {});
+                  .catch((e) => console.error("building sensor-timeseries (click) fetch failed:", e));
               };
 
               // 1. Fast path: lm_building_id already in the 500-sensor sample
@@ -3421,7 +3429,7 @@ function MapView({ metadataData, selectedK, clusters, selectedClusters, sensorId
                   }
                   selectBuilding(bid ?? sensorId);
                 })
-                .catch(() => selectBuilding(sensorId));
+                .catch((e) => { console.error("sensor-properties fetch failed:", e); selectBuilding(sensorId); });
             }}
             getTooltip={({ object }) => {
               if (!object) return null;

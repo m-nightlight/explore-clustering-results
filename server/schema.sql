@@ -39,3 +39,31 @@ CREATE TABLE IF NOT EXISTS custom_cluster_cols (
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Pre-aggregated cluster profiles (mean/q25/q75 per ts × cluster column × cluster id).
+-- Used by /api/cluster-profiles (non-median) and /api/timeseries-overview for fast reads.
+-- Refresh with: REFRESH MATERIALIZED VIEW CONCURRENTLY mv_cluster_profiles;
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cluster_profiles AS
+SELECT
+    t.ts,
+    u.cluster_col,
+    u.cluster_id::text                                           AS cluster_id,
+    AVG(t.temperature)                                           AS val,
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY t.temperature)  AS q25,
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY t.temperature)  AS q75,
+    COUNT(DISTINCT t.sensor_id)                                  AS sensor_count
+FROM temperatures t
+JOIN sensors s USING (sensor_id)
+JOIN LATERAL (VALUES
+    ('cluster',            s.cluster::int),
+    ('stage1_cluster',     s.stage1_cluster::int),
+    ('stage2_subcluster',  s.stage2_subcluster::int)
+) AS u(cluster_col, cluster_id) ON u.cluster_id IS NOT NULL
+GROUP BY t.ts, u.cluster_col, u.cluster_id
+WITH NO DATA;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_cluster_profiles
+    ON mv_cluster_profiles (cluster_col, cluster_id, ts DESC);
+
+-- After creating, populate once:
+-- REFRESH MATERIALIZED VIEW mv_cluster_profiles;
