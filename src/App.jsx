@@ -8,6 +8,7 @@ import { MetadataStats } from "./tabs/MetadataStats";
 import { ClusterProfiles } from "./tabs/ClusterProfiles";
 import { TimeSeriesView } from "./tabs/TimeSeriesView";
 import MapView from "./tabs/MapView";
+import { BuildingHomogeneity } from "./tabs/BuildingHomogeneity";
 
 // ─── Main App ────────────────────────────────────────────────────
 export default function App() {
@@ -502,6 +503,15 @@ export default function App() {
             )}
             {activeTab === "deghours" && (
               <DegreeHoursMap metadataData={metadataData} />
+            )}
+            {activeTab === "homogeneity" && (
+              <BuildingHomogeneity
+                metadataData={metadataData}
+                selectedK={selectedK}
+                clusters={clusters}
+                getEffectiveClusterColor={getEffectiveClusterColor}
+                onNavigateToBuilding={handleNavigateToBuilding}
+              />
             )}
           </main>
         </>

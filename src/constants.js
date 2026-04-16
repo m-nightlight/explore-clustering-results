@@ -57,9 +57,10 @@ export const GROUP_COLORS = ["#FFFFFF","#FFD93D","#FF6B9D","#6BCB77","#C8B6FF","
 export const SPHERE_GEOMETRY = new SphereGeometry({ radius: 1, nlat: 8, nlong: 8 });
 
 export const TABS = [
-  { id: "profiles",   label: "Cluster Profiles",    icon: "◈" },
-  { id: "timeseries", label: "Time Series",          icon: "◆" },
-  { id: "metadata",   label: "Metadata Statistics",  icon: "▦" },
-  { id: "map",        label: "Sensor Map",           icon: "◉" },
-  { id: "deghours",   label: "Degree Hours",         icon: "▲" },
+  { id: "profiles",     label: "Cluster Profiles",      icon: "◈" },
+  { id: "timeseries",   label: "Time Series",            icon: "◆" },
+  { id: "metadata",     label: "Metadata Statistics",    icon: "▦" },
+  { id: "map",          label: "Sensor Map",             icon: "◉" },
+  { id: "deghours",     label: "Degree Hours",           icon: "▲" },
+  { id: "homogeneity",  label: "Building Homogeneity",   icon: "⬡" },
 ];

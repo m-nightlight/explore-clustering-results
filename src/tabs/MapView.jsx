@@ -217,6 +217,10 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   const [selectedBuildings, setSelectedBuildings] = useState(new Set());
   const [buildingTimeseries, setBuildingTimeseries] = useState(null);
   const [buildingGeometry, setBuildingGeometry] = useState(null);
+  const [navigatedBuildingId, setNavigatedBuildingId] = useState(null); // bid navigated from another tab
+  const pendingBuildingSelectRef = useRef(null); // re-select after analyseView clears selection
+  const analyseViewRef = useRef(null);           // always points to latest analyseView closure
+  const navAnalysisTimerRef = useRef(null);      // timeout handle for post-fly auto-analysis
   const [buildingSearch, setBuildingSearch] = useState("");
   const canvasRef = useRef();
   const sensorCanvasRef = useRef();
@@ -257,16 +261,25 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   const customClusterColsRef = useRef(customClusterCols);
   useEffect(() => { customClusterColsRef.current = customClusterCols; }, [customClusterCols]);
 
-  // Cross-tab navigation from Metadata Statistics: fly to the building location.
-  // The user then clicks the building on the map to select it and load data.
+  // Cross-tab navigation: fly to the building, then auto-analyse and select it.
   useEffect(() => {
     if (!navigateToBuilding) return;
-    const { lat, lon } = navigateToBuilding;
+    const { bid, lat, lon } = navigateToBuilding;
     if (lat != null && lon != null) {
       setViewState((vs) => ({
         ...vs, latitude: lat, longitude: lon, zoom: 17, pitch: 60,
         transitionDuration: 1500, transitionInterpolator: new FlyToInterpolator(),
       }));
+    }
+    if (bid) {
+      setNavigatedBuildingId(bid);
+      pendingBuildingSelectRef.current = bid;
+      // Fire analysis after the fly animation finishes (1500 ms), then the
+      // sensorProperties effect will re-select the building automatically.
+      clearTimeout(navAnalysisTimerRef.current);
+      navAnalysisTimerRef.current = setTimeout(() => {
+        analyseViewRef.current?.();
+      }, 1600);
     }
   }, [navigateToBuilding]);
 
@@ -400,6 +413,61 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
     if (selectedBuildings.size === 0) return sensorProperties;
     return sensorProperties.filter((s) => selectedBuildings.has(s["lm_building_id"] || "Unknown"));
   }, [sensorProperties, selectedBuildings]);
+
+  // Building summary stats shown in the table beneath the map
+  const buildingSummary = useMemo(() => {
+    if (!activeSensorProperties?.length || selectedBuildings.size === 0) return null;
+    const sp = activeSensorProperties;
+
+    // --- metadata ---
+    const year = sp.map((s) => Number(s["Nybyggnadsår"])).filter((v) => v > 1800 && v < 2100);
+    const floors = sp.map((s) => Number(s["floor_df1"])).filter((v) => !isNaN(v));
+    const maxFloors = sp.map((s) => Number(s["max_floor"])).filter((v) => !isNaN(v) && v > 0);
+
+    // --- degree hours (median across sensors) ---
+    const dhFields = [
+      { key: "dh_2018",        label: "DH 2018",    unit: "°Ch" },
+      { key: "dh_2024",        label: "DH 2024",    unit: "°Ch" },
+      { key: "dh_2025",        label: "DH 2025",    unit: "°Ch" },
+      { key: "Kh above 26°C", label: "h > 26 °C",  unit: "h"   },
+      { key: "Kh above 27°C", label: "h > 27 °C",  unit: "h"   },
+      { key: "Kh above 28°C", label: "h > 28 °C",  unit: "h"   },
+    ];
+    const median = (arr) => {
+      if (!arr.length) return null;
+      const s = [...arr].sort((a, b) => a - b);
+      const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    const dhStats = dhFields.map(({ key, label, unit }) => {
+      const vals = sp.map((s) => Number(s[key])).filter((v) => !isNaN(v) && v >= 0);
+      if (!vals.length) return null;
+      return { label, unit, median: median(vals), min: Math.min(...vals), max: Math.max(...vals) };
+    }).filter(Boolean);
+
+    // --- temperature stats from timeseries ---
+    let tempStats = null;
+    if (buildingTimeseries?.sensors) {
+      const allVals = Object.values(buildingTimeseries.sensors).flat().filter((v) => v != null && !isNaN(v));
+      if (allVals.length) {
+        const tMin = Math.min(...allVals);
+        const tMax = Math.max(...allVals);
+        const tMean = allVals.reduce((s, v) => s + v, 0) / allVals.length;
+        const tStd = Math.sqrt(allVals.reduce((s, v) => s + (v - tMean) ** 2, 0) / allVals.length);
+        tempStats = { min: tMin, max: tMax, mean: tMean, std: tStd, n: allVals.length };
+      }
+    }
+
+    return {
+      constructionYear: year.length ? Math.round(median(year)) : null,
+      floorMin: floors.length ? Math.min(...floors) : null,
+      floorMax: floors.length ? Math.max(...floors) : null,
+      buildingMaxFloor: maxFloors.length ? Math.max(...maxFloors) : null,
+      nSensors: sp.length,
+      dhStats,
+      tempStats,
+    };
+  }, [activeSensorProperties, selectedBuildings, buildingTimeseries]);
 
   // ── Metric color map (sensor_id → [r,g,b]) for continuous coloring ──
   const metricColorMap = useMemo(() => {
@@ -814,6 +882,9 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
       }));
     }
     if (buildingGeometry?.features?.length) {
+      const isNavigated = navigatedBuildingId && selectedBuildings.has(navigatedBuildingId);
+      const fillRgb  = isNavigated ? [255, 190, 50]  : [88, 166, 255];
+      const lineRgb  = isNavigated ? [255, 190, 50]  : [88, 166, 255];
       ls.push(new GeoJsonLayer({
         id: "buildings",
         data: buildingGeometry,
@@ -822,16 +893,16 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
         extruded: mode3D,
         wireframe: mode3D && buildingWireframe,
         getElevation: (f) => f.properties?.height ?? 10,
-        getFillColor: (mode3D && buildingWireframe) ? [88, 166, 255, 0] : mode3D ? [88, 166, 255, 180] : [88, 166, 255, 25],
-        getLineColor: (mode3D && buildingWireframe) ? [255, 255, 255, 200] : [88, 166, 255, 200],
-        lineWidthMinPixels: (mode3D && buildingWireframe) ? wireLineWidth : 1,
-        lineWidthMaxPixels: (mode3D && buildingWireframe) ? wireLineWidth * 2 : 2,
+        getFillColor: (mode3D && buildingWireframe) ? [...fillRgb, 0] : mode3D ? [...fillRgb, 180] : [...fillRgb, isNavigated ? 55 : 25],
+        getLineColor: (mode3D && buildingWireframe) ? [255, 255, 255, 200] : [...lineRgb, isNavigated ? 255 : 200],
+        lineWidthMinPixels: isNavigated ? 2 : (mode3D && buildingWireframe) ? wireLineWidth : 1,
+        lineWidthMaxPixels: isNavigated ? 4 : (mode3D && buildingWireframe) ? wireLineWidth * 2 : 2,
         material: mode3D ? { ambient: 0.35, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] } : undefined,
-        updateTriggers: { extruded: [mode3D], getFillColor: [mode3D, buildingWireframe], wireframe: [mode3D, buildingWireframe] },
+        updateTriggers: { extruded: [mode3D], getFillColor: [mode3D, buildingWireframe, navigatedBuildingId, selectedBuildings], getLineColor: [mode3D, buildingWireframe, navigatedBuildingId, selectedBuildings], wireframe: [mode3D, buildingWireframe] },
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, buildingWireframe, wireLineWidth, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, buildingWireframe, wireLineWidth, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors, navigatedBuildingId, selectedBuildings]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -923,6 +994,9 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
       .catch((e) => console.error("sensors-properties fetch failed:", e));
   };
 
+  // Keep ref in sync so setTimeout callbacks always call the latest closure
+  analyseViewRef.current = analyseView;
+
   // Auto-run analysis once on initial load when sensors + selectedK are ready
   const autoAnalysedRef = useRef(false);
   useEffect(() => {
@@ -933,6 +1007,15 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleSensors, selectedK]);
+
+  // After analyseView loads sensorProperties, re-select a building that was pending
+  useEffect(() => {
+    if (!sensorProperties || !pendingBuildingSelectRef.current) return;
+    const bid = pendingBuildingSelectRef.current;
+    pendingBuildingSelectRef.current = null;
+    setSelectedBuildings(new Set([bid]));
+    setBuildingTimeseries(null);
+  }, [sensorProperties]);
 
   // Shared brush handlers — drag on any chart to zoom the time axis
   const onChartMouseDown = useCallback((e) => {
@@ -1203,7 +1286,8 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
     const activeSensorData = buildingTimeseries || mapSensorData;
     if (!allClusterProfiles || !activeSensorData || !sensorCanvasRef.current) return;
     const ts = allClusterProfiles.timestamps; if (!ts?.length) return;
-    const viewProfiles = Object.fromEntries(
+    const isBuildingMode = !!buildingTimeseries;
+    const viewProfiles = isBuildingMode ? {} : Object.fromEntries(
       Object.entries(allClusterProfiles.profiles).filter(([cid]) => viewClusterIds.has(cid))
     );
     const yVals = [...Object.values(viewProfiles).flatMap((p) => p.values), ...Object.values(activeSensorData.sensors).flat()].filter((v) => v != null && !isNaN(v));
@@ -1221,16 +1305,19 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
         }
         ctx.stroke();
       });
-      Object.entries(viewProfiles).forEach(([cidStr, p]) => {
-        const ci = clusters.indexOf(Number(cidStr));
-        ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
-        let started = false;
-        for (let i = lo; i <= hi; i++) {
-          const v = p.values[i]; if (v === null) { started = false; continue; }
-          if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
-        }
-        ctx.stroke();
-      });
+      // Only draw full-view cluster means when not in building mode
+      if (!isBuildingMode) {
+        Object.entries(viewProfiles).forEach(([cidStr, p]) => {
+          const ci = clusters.indexOf(Number(cidStr));
+          ctx.strokeStyle = getEffectiveClusterColor(Number(cidStr), ci); ctx.lineWidth = 2; ctx.beginPath();
+          let started = false;
+          for (let i = lo; i <= hi; i++) {
+            const v = p.values[i]; if (v === null) { started = false; continue; }
+            if (!started) { ctx.moveTo(xScale(i), yScale(v)); started = true; } else ctx.lineTo(xScale(i), yScale(v));
+          }
+          ctx.stroke();
+        });
+      }
     }, xZoom);
   }, [allClusterProfiles, mapSensorData, buildingTimeseries, viewClusterIds, clusters, analysedSensors, drawChart, analysisTab, getEffectiveClusterColor, xZoom]);
 
@@ -1427,6 +1514,18 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
           <button onClick={analyseView} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#457B9D", color: "#457B9D" }}>
             Analyse view
           </button>
+          {selectedBuildings.size > 0 && (
+            <button
+              onClick={() => {
+                const bid = [...selectedBuildings][0];
+                pendingBuildingSelectRef.current = bid;
+                analyseView();
+              }}
+              style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#FFB950", color: "#FFB950", background: "#FFB95011" }}
+            >
+              ⬡ Analyse building
+            </button>
+          )}
           {analysedSensors && outdoorClimateVals && (
             <button onClick={() => setShowOutdoorOverlay(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorOverlay ? "#ff8a65" : "#3d4555", color: showOutdoorOverlay ? "#ff8a65" : "#8b949e", background: showOutdoorOverlay ? "#ff8a6522" : "none" }}>
               🌡 Outdoor temp
@@ -1632,14 +1731,19 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
               const snapshotVisible = visibleSensors.map((d) => d.id).slice(0, 200);
 
               const selectBuilding = (bid) => {
-                setSelectedBuildings(new Set([bid]));
-                setBuildingTimeseries(null);
+                setNavigatedBuildingId(bid);
                 setAnalysisTab("profiles");
-                if (!snapshotVisible.length) return;
-                fetch(`${API}/api/sensor-timeseries?sensor_ids=${encodeURIComponent(snapshotVisible.join(","))}`)
-                  .then((r) => r.json())
-                  .then(setBuildingTimeseries)
-                  .catch((e) => console.error("building sensor-timeseries (click) fetch failed:", e));
+                if (sensorProperties) {
+                  // Properties already loaded — select building and let the
+                  // buildingTimeseries effect fetch the building-specific sensors.
+                  setSelectedBuildings(new Set([bid]));
+                  setBuildingTimeseries(null);
+                } else {
+                  // No analysis run yet — run it now; the pendingBuildingSelect
+                  // effect will re-select the building once properties load.
+                  pendingBuildingSelectRef.current = bid;
+                  analyseView();
+                }
               };
 
               // 1. Fast path: lm_building_id already in the 500-sensor sample
@@ -1811,6 +1915,102 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
           );
         })()}
         </div>
+
+        {/* Building summary table — shown when a building is selected */}
+        {buildingSummary && (
+          <div style={{ marginTop: 8, padding: "10px 14px", background: "#1d2232", border: "1px solid #2e3440", borderRadius: 8, fontSize: 11 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#8b949e", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Building summary
+              </span>
+              <span style={{ fontSize: 10, color: "#3d4555" }}>
+                {[...selectedBuildings][0]}
+              </span>
+              <span style={{ fontSize: 10, color: "#556677", marginLeft: "auto" }}>
+                {buildingSummary.nSensors} sensors
+              </span>
+            </div>
+
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+
+              {/* Metadata block */}
+              <div>
+                <div style={{ fontSize: 9, color: "#556677", textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: 5 }}>Metadata</div>
+                <table style={{ borderCollapse: "collapse" }}>
+                  <tbody>
+                    {buildingSummary.constructionYear != null && (
+                      <tr>
+                        <td style={{ color: "#8b949e", paddingRight: 12, paddingBottom: 3 }}>Built</td>
+                        <td style={{ color: "#c9d1d9", fontVariantNumeric: "tabular-nums" }}>{buildingSummary.constructionYear}</td>
+                      </tr>
+                    )}
+                    {buildingSummary.buildingMaxFloor != null && (
+                      <tr>
+                        <td style={{ color: "#8b949e", paddingRight: 12, paddingBottom: 3 }}>Floors</td>
+                        <td style={{ color: "#c9d1d9", fontVariantNumeric: "tabular-nums" }}>{buildingSummary.buildingMaxFloor}</td>
+                      </tr>
+                    )}
+                    {buildingSummary.floorMin != null && (
+                      <tr>
+                        <td style={{ color: "#8b949e", paddingRight: 12, paddingBottom: 3 }}>Sensor floors</td>
+                        <td style={{ color: "#c9d1d9", fontVariantNumeric: "tabular-nums" }}>
+                          {buildingSummary.floorMin === buildingSummary.floorMax
+                            ? buildingSummary.floorMin
+                            : `${buildingSummary.floorMin} – ${buildingSummary.floorMax}`}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Temperature block */}
+              {buildingSummary.tempStats && (
+                <div>
+                  <div style={{ fontSize: 9, color: "#556677", textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: 5 }}>Temperature (period)</div>
+                  <table style={{ borderCollapse: "collapse" }}>
+                    <tbody>
+                      {[
+                        ["Min",  buildingSummary.tempStats.min.toFixed(1) + " °C"],
+                        ["Max",  buildingSummary.tempStats.max.toFixed(1) + " °C"],
+                        ["Mean", buildingSummary.tempStats.mean.toFixed(1) + " °C"],
+                        ["Std",  buildingSummary.tempStats.std.toFixed(2) + " °C"],
+                      ].map(([label, val]) => (
+                        <tr key={label}>
+                          <td style={{ color: "#8b949e", paddingRight: 12, paddingBottom: 3 }}>{label}</td>
+                          <td style={{ color: "#c9d1d9", fontVariantNumeric: "tabular-nums" }}>{val}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Degree hours block */}
+              {buildingSummary.dhStats.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 9, color: "#556677", textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: 5 }}>Degree hours (median · min – max)</div>
+                  <table style={{ borderCollapse: "collapse" }}>
+                    <tbody>
+                      {buildingSummary.dhStats.map(({ label, unit, median, min, max }) => (
+                        <tr key={label}>
+                          <td style={{ color: "#8b949e", paddingRight: 12, paddingBottom: 3 }}>{label}</td>
+                          <td style={{ color: "#c9d1d9", fontVariantNumeric: "tabular-nums", paddingRight: 8 }}>
+                            {Math.round(median)}
+                          </td>
+                          <td style={{ color: "#556677", fontVariantNumeric: "tabular-nums", fontSize: 10 }}>
+                            {Math.round(min)} – {Math.round(max)} {unit}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Side panel */}
@@ -1907,9 +2107,11 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
                     </div>
                     <p style={{ ...styles.mapInfo, marginBottom: 0, marginTop: 4 }}>
                       {buildingTimeseries
-                        ? `${Object.keys(buildingTimeseries.sensors).length} sensors (building)`
-                        : mapSensorData ? `${Object.keys(mapSensorData.sensors).length} sensors` : "Loading…"
-                      } + cluster means
+                        ? `${Object.keys(buildingTimeseries.sensors).length} sensors — building only`
+                        : mapSensorData
+                          ? `${Object.keys(mapSensorData.sensors).length} sensors + cluster means`
+                          : "Loading…"
+                      }
                     </p>
                     <div style={{ position: "relative" }}>
                       <canvas ref={sensorCanvasRef} style={{ ...styles.canvas, height: tallPlots ? 420 : (showOutdoorOverlay ? 240 : 200) }} onMouseDown={onChartMouseDown} onMouseMove={onChartMouseMove} onMouseUp={onChartMouseUp} onMouseLeave={() => { brushRef.current = null; setBrushOverlay(null); }} />
