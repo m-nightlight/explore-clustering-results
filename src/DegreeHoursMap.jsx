@@ -172,6 +172,10 @@ export default function DegreeHoursMap({ metadataData }) {
   const [outlierActive, setOutlierActive]     = useState(true);
   const [outlierCutoff, setOutlierCutoff]     = useState(2000);
   const [outlierInput, setOutlierInput]       = useState("2000");
+  const [scaleMax, setScaleMax]               = useState(null); // null = auto
+  const [scaleMaxInput, setScaleMaxInput]     = useState("");
+  const [buildingScaleMax, setBuildingScaleMax]           = useState(null);
+  const [buildingScaleMaxInput, setBuildingScaleMaxInput] = useState("");
 
   // ── Data ──
   const [fieldCache, setFieldCache]   = useState({});
@@ -587,6 +591,15 @@ export default function DegreeHoursMap({ metadataData }) {
     }
   };
 
+  const applyScaleMaxInput = () => {
+    const v = parseFloat(scaleMaxInput);
+    if (!isNaN(v) && v > 0) setScaleMax(v); else { setScaleMax(null); setScaleMaxInput(""); }
+  };
+  const applyBuildingScaleMaxInput = () => {
+    const v = parseFloat(buildingScaleMaxInput);
+    if (!isNaN(v) && v > 0) setBuildingScaleMax(v); else { setBuildingScaleMax(null); setBuildingScaleMaxInput(""); }
+  };
+
   // ── Effective cutoff (null = no filtering) ──
   const activeCutoff = outlierActive && outlierCutoff != null ? outlierCutoff : null;
 
@@ -622,6 +635,10 @@ export default function DegreeHoursMap({ metadataData }) {
     });
     return max || 1;
   }, [fieldCache]);
+
+  // User override or auto global max
+  const effectiveSensorMax   = scaleMax          ?? globalMaxValue;
+  const effectiveBuildingMax = buildingScaleMax   ?? globalBuildingMaxValue;
 
   // ── Max value for color/height scale (respects outlier filter) ──
   const maxValue = useMemo(() => {
@@ -726,7 +743,7 @@ export default function DegreeHoursMap({ metadataData }) {
             const val = buildingDhValues[bid];
             if (val == null) return [45, 60, 90, 70];
             if (activeBuildingCutoff !== null && val > activeBuildingCutoff) return [45, 60, 90, 40];
-            return [...dhToColor(val, globalBuildingMaxValue), 230];
+            return [...dhToColor(val, effectiveBuildingMax), 230];
           },
           getLineColor: [0, 0, 0, 0],
           lineWidthMinPixels: 0,
@@ -773,8 +790,8 @@ export default function DegreeHoursMap({ metadataData }) {
             return [lon + lonOffset, lat];
           },
           getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
-          getFillColor: (d) => [...dhToColor(d.value, globalMaxValue), 230],
-          getLineColor: (d) => [...dhToColor(d.value, globalMaxValue), 80],
+          getFillColor: (d) => [...dhToColor(d.value, effectiveSensorMax), 230],
+          getLineColor: (d) => [...dhToColor(d.value, effectiveSensorMax), 80],
           radius,
           diskResolution: 18,
           extruded: true,
@@ -783,7 +800,7 @@ export default function DegreeHoursMap({ metadataData }) {
           updateTriggers: {
             getPosition:  [useParquetCoords, pointHeights],
             getElevation: [baseH, heightScale],
-            getFillColor: [buildingView ? globalBuildingMaxValue : globalMaxValue],
+            getFillColor: [buildingView ? effectiveBuildingMax : effectiveSensorMax],
           },
         })
       );
@@ -794,7 +811,7 @@ export default function DegreeHoursMap({ metadataData }) {
     buildingView, buildingDhValues, buildingMaxValue, activeBuildingCutoff,
     showBuildings, buildingWireframe, buildings3D,
     selectedFields, fieldCache,
-    heightScale, radius, maxValue, globalMaxValue, globalBuildingMaxValue, baseH,
+    heightScale, radius, maxValue, effectiveSensorMax, effectiveBuildingMax, baseH,
     activeCutoff,
     useParquetCoords, pointHeights,
   ]);
@@ -922,8 +939,8 @@ export default function DegreeHoursMap({ metadataData }) {
             background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})` }} />
           <div style={{ display: "flex", justifyContent: "space-between", width: 180, marginTop: 2, fontSize: 10, color: "#556677" }}>
             <span>0</span>
-            <span>{Math.round((buildingView ? globalBuildingMaxValue : globalMaxValue) / 2).toLocaleString()}</span>
-            <span>{Math.round(buildingView ? globalBuildingMaxValue : globalMaxValue).toLocaleString()} °h</span>
+            <span>{Math.round((buildingView ? effectiveBuildingMax : effectiveSensorMax) / 2).toLocaleString()}</span>
+            <span>{Math.round(buildingView ? effectiveBuildingMax : effectiveSensorMax).toLocaleString()} °h</span>
           </div>
           {selectedFields.length > 1 && (
             <div style={{ marginTop: 5, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1060,6 +1077,27 @@ export default function DegreeHoursMap({ metadataData }) {
                     </PopRow>
                   </>
                 )}
+                <PopDivider />
+                <PopLabel>Scale max — sensors (auto: {Math.round(globalMaxValue).toLocaleString()})</PopLabel>
+                <PopRow>
+                  <input value={scaleMaxInput} onChange={(e) => setScaleMaxInput(e.target.value)}
+                    onBlur={applyScaleMaxInput} onKeyDown={(e) => e.key === "Enter" && applyScaleMaxInput()}
+                    style={{ ...s.numInput, width: 72 }} placeholder="auto" />
+                  {scaleMax !== null && (
+                    <ChipBtn onClick={() => { setScaleMax(null); setScaleMaxInput(""); }}
+                      style={{ color: "#8b949e" }}>✕ reset</ChipBtn>
+                  )}
+                </PopRow>
+                <PopLabel>Scale max — buildings (auto: {Math.round(globalBuildingMaxValue).toLocaleString()})</PopLabel>
+                <PopRow>
+                  <input value={buildingScaleMaxInput} onChange={(e) => setBuildingScaleMaxInput(e.target.value)}
+                    onBlur={applyBuildingScaleMaxInput} onKeyDown={(e) => e.key === "Enter" && applyBuildingScaleMaxInput()}
+                    style={{ ...s.numInput, width: 72 }} placeholder="auto" />
+                  {buildingScaleMax !== null && (
+                    <ChipBtn onClick={() => { setBuildingScaleMax(null); setBuildingScaleMaxInput(""); }}
+                      style={{ color: "#8b949e" }}>✕ reset</ChipBtn>
+                  )}
+                </PopRow>
               </Popover>
             )}
           </div>
