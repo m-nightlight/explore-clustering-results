@@ -966,7 +966,8 @@ async def get_dh_data(request: Request, field: str = Query(...)):
         rows = await conn.fetch(
             """
             SELECT sensor_id, lat, lon,
-                   (properties->>$1)::double precision AS value
+                   (properties->>$1)::double precision AS value,
+                   properties->>'lm_building_id' AS lm_building_id
             FROM sensors
             WHERE sensor_type != 'outdoor'
               AND properties->>$1 IS NOT NULL
@@ -975,7 +976,13 @@ async def get_dh_data(request: Request, field: str = Query(...)):
             field,
         )
     return [
-        {"sensor_id": r["sensor_id"], "lat": r["lat"], "lon": r["lon"], "value": r["value"] or 0.0}
+        {
+            "sensor_id": r["sensor_id"],
+            "lat": r["lat"],
+            "lon": r["lon"],
+            "value": r["value"] or 0.0,
+            "lm_building_id": r["lm_building_id"],
+        }
         for r in rows
         if r["lat"] is not None and r["lon"] is not None
     ]

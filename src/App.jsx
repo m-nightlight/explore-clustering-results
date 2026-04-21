@@ -277,245 +277,256 @@ export default function App() {
   const isDataLoaded = metadataData !== null;
 
   return (
-    <div style={styles.container}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div style={styles.headerInner}>
-          <div>
-            <h1 style={styles.title}>Sensor Cluster Explorer</h1>
-            <p style={styles.subtitle}>Temperature sensor analysis & cluster profiling</p>
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "56px 1fr",
+      height: "100vh",
+      overflow: "hidden",
+      background: "#1a1f2e",
+      fontFamily: "'JetBrains Mono','Fira Code','SF Mono',monospace",
+      color: "#e0e0e0",
+    }}>
+      {/* ── Left icon rail ── */}
+      <nav style={{
+        background: "#161b22",
+        borderRight: "1px solid #2e3440",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        paddingTop: 8,
+      }}>
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            title={tab.label}
+            style={{
+              width: "100%",
+              background: activeTab === tab.id ? "rgba(76,201,240,0.07)" : "none",
+              border: "none",
+              borderLeft: `2px solid ${activeTab === tab.id ? "#4CC9F0" : "transparent"}`,
+              color: activeTab === tab.id ? "#4CC9F0" : "#556677",
+              padding: "11px 0",
+              fontSize: 16,
+              cursor: "pointer",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              transition: "all 0.12s",
+            }}
+          >
+            {tab.icon}
+          </button>
+        ))}
+        {/* Assignment footer */}
+        <div style={{ marginTop: "auto", width: "100%", padding: "8px 0", borderTop: "1px solid #2e3440",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+          {selectedK && clusters.length > 0 && (
+            <>
+              <span style={{ fontSize: 13, color: "#4CC9F0", fontWeight: 700 }}>{clusters.length}</span>
+              <span style={{ fontSize: 8, color: "#3d4555", textTransform: "uppercase", letterSpacing: 0.5 }}>k</span>
+            </>
+          )}
+        </div>
+      </nav>
+
+      {/* ── Content column ── */}
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
+        {/* Loading / Error (before data arrives) */}
+        {!metadataData && (
+          <div style={{ padding: "48px 24px", textAlign: "center" }}>
+            {loading && <div style={styles.loading}>Loading data from server…</div>}
+            {error && (
+              <div>
+                <div style={styles.error}>{error}</div>
+                <button style={styles.retryBtn} onClick={loadData}>Retry</button>
+              </div>
+            )}
           </div>
-          {selectedK && (
-            <div style={styles.kSelector}>
-              <label style={styles.kLabel}>Cluster Assignment:</label>
-              <select
-                value={selectedK}
-                onChange={(e) => setSelectedK(e.target.value)}
-                style={styles.select}
-              >
-                {(() => {
-                  const csvNames = new Set(Object.keys(customClusterCols));
-                  const csvCols = clusterColumns.filter((c) => csvNames.has(c));
-                  const builtinCols = clusterColumns.filter((c) => !csvNames.has(c));
-                  return (
-                    <>
-                      {csvCols.length > 0 && (
-                        <optgroup label="CSV imports">
-                          {csvCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                        </optgroup>
-                      )}
-                      {builtinCols.length > 0 && (
-                        <optgroup label="Built-in">
-                          {builtinCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                        </optgroup>
-                      )}
-                    </>
-                  );
-                })()}
-              </select>
-              <span style={styles.kBadge}>{clusters.length} clusters</span>
-              {Object.keys(customClusterCols).map((colName) => (
-                <button
-                  key={colName}
-                  onClick={() => removeCustomClusterCol(colName)}
-                  title={`Remove custom column "${colName}"`}
-                  style={{ ...styles.miniBtn, borderColor: "#4CC9F0", color: "#4CC9F0", fontSize: 9 }}
-                >
-                  {colName} ×
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </header>
+        )}
 
-      {/* Loading / Error State */}
-      {!metadataData && (
-        <div style={styles.uploadSection}>
-          {loading && <div style={styles.loading}>Loading data from server...</div>}
-          {error && (
-            <div style={{ textAlign: "center" }}>
-              <div style={styles.error}>{error}</div>
-              <button style={styles.retryBtn} onClick={loadData}>Retry</button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Main Content */}
-      {isDataLoaded && (
-        <>
-          {/* Tabs */}
-          <nav style={styles.tabBar}>
-            {TABS.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                style={{
-                  ...styles.tab,
-                  ...(activeTab === tab.id ? styles.tabActive : {}),
-                }}
-              >
-                <span style={styles.tabIcon}>{tab.icon}</span>
-                {tab.label}
-              </button>
-            ))}
-          </nav>
-
-          {/* Cluster Selector */}
-          <div style={styles.clusterBar}>
-            <div style={styles.clusterBarHeader}>
-              <span style={styles.clusterBarTitle}>Clusters</span>
-              <button onClick={selectAllClusters} style={styles.miniBtn}>All</button>
-              <button onClick={selectNoneClusters} style={styles.miniBtn}>None</button>
-              <button
-                onClick={() => { setGroupingMode((v) => !v); setPendingGroupMembers(new Set()); }}
-                style={{ ...styles.miniBtn, borderColor: groupingMode ? "#FFD93D" : "#3d4555", color: groupingMode ? "#FFD93D" : "#8b949e", background: groupingMode ? "#FFD93D22" : "none" }}
-              >
-                ⊕ Group
-              </button>
-              <button
-                onClick={() => csvInputRef.current?.click()}
-                title="Import a CSV with combined_name + cluster column"
-                style={{ ...styles.miniBtn }}
-              >
-                ⊕ CSV
-              </button>
-              <input ref={csvInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleCSVFileChange} />
-              {pendingCSV && (
-                <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#1f2a3a", border: "1px solid #457B9D", borderRadius: 6, padding: "3px 6px" }}>
-                  <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap" }}>Name:</span>
-                  <input
-                    autoFocus
-                    value={pendingCSVName}
-                    onChange={(e) => setPendingCSVName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") confirmPendingCSV(); if (e.key === "Escape") { setPendingCSV(null); setPendingCSVName(""); } }}
-                    style={{ width: 120, background: "transparent", border: "none", outline: "none", color: "#c9d1d9", fontSize: 11, fontFamily: "monospace" }}
-                  />
-                  <button onClick={confirmPendingCSV} style={{ ...styles.miniBtn, padding: "2px 8px", fontSize: 10, borderColor: "#457B9D", color: "#457B9D" }}>Add</button>
-                  <button onClick={() => { setPendingCSV(null); setPendingCSVName(""); }} style={{ ...styles.miniBtn, padding: "2px 6px", fontSize: 10 }}>✕</button>
-                </div>
-              )}
-              {groupingMode && pendingGroupMembers.size >= 2 && (
-                <button onClick={createGroup} style={{ ...styles.miniBtn, borderColor: "#6BCB77", color: "#6BCB77", background: "#6BCB7722" }}>
-                  ✓ Create ({pendingGroupMembers.size})
-                </button>
-              )}
-            </div>
-            <div style={styles.clusterChips}>
-              {/* Existing groups */}
-              {clusterGroups.map((g, gi) => {
-                const groupColor = GROUP_COLORS[gi % GROUP_COLORS.length];
-                const memberList = [...g.memberIds].sort((a, b) => a - b);
-                const count = metadataData.filter((r) => memberList.includes(r[selectedK])).length;
-                const allOn = memberList.every((c) => selectedClusters.has(c));
-                return (
-                  <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
-                    <button
-                      onClick={() => setSelectedClusters((prev) => {
-                        const next = new Set(prev);
-                        if (allOn) memberList.forEach((c) => next.delete(c)); else memberList.forEach((c) => next.add(c));
-                        return next;
-                      })}
-                      style={{ ...styles.chip, backgroundColor: allOn ? groupColor : "transparent", color: allOn ? "#111" : "#999", borderColor: groupColor, fontWeight: 600 }}
-                    >
-                      {g.name}: {memberList.join("+")} <span style={styles.chipCount}>({count})</span>
-                    </button>
-                    <button onClick={() => deleteGroup(g.id)} style={{ ...styles.miniBtn, padding: "1px 5px", fontSize: 10, color: "#f85149", borderColor: "#f85149", lineHeight: 1 }}>×</button>
-                  </span>
-                );
-              })}
-              {/* Individual cluster chips */}
-              {clusters.map((c, i) => {
-                const inGroup = clusterToGroupIdx[String(c)] !== undefined;
-                if (inGroup) return null; // grouped clusters hidden from individual list
-                const count = metadataData.filter((r) => r[selectedK] === c).length;
-                const isPending = pendingGroupMembers.has(c);
-                const isSelected = selectedClusters.has(c);
-                const color = getEffectiveClusterColor(c, i);
-                return (
+        {isDataLoaded && (
+          <>
+            {/* Cluster bar — hidden for deghours tab */}
+            {activeTab !== "deghours" && (
+              <div style={{ padding: "8px 16px", borderBottom: "1px solid #2e3440", background: "#161b2288", flexShrink: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                  {selectedK && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <select value={selectedK} onChange={(e) => setSelectedK(e.target.value)} style={styles.select}>
+                        {(() => {
+                          const csvNames = new Set(Object.keys(customClusterCols));
+                          const csvCols = clusterColumns.filter((c) => csvNames.has(c));
+                          const builtinCols = clusterColumns.filter((c) => !csvNames.has(c));
+                          return (
+                            <>
+                              {csvCols.length > 0 && (
+                                <optgroup label="CSV imports">
+                                  {csvCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                                </optgroup>
+                              )}
+                              {builtinCols.length > 0 && (
+                                <optgroup label="Built-in">
+                                  {builtinCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                                </optgroup>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </select>
+                      <span style={styles.kBadge}>{clusters.length} clusters</span>
+                      {Object.keys(customClusterCols).map((colName) => (
+                        <button key={colName} onClick={() => removeCustomClusterCol(colName)}
+                          title={`Remove custom column "${colName}"`}
+                          style={{ ...styles.miniBtn, borderColor: "#4CC9F0", color: "#4CC9F0", fontSize: 9 }}>
+                          {colName} ×
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <button onClick={selectAllClusters} style={styles.miniBtn}>All</button>
+                  <button onClick={selectNoneClusters} style={styles.miniBtn}>None</button>
                   <button
-                    key={c}
-                    onClick={() => groupingMode ? togglePending(c) : toggleCluster(c)}
-                    style={{
-                      ...styles.chip,
-                      backgroundColor: groupingMode
-                        ? (isPending ? color + "55" : "transparent")
-                        : (isSelected ? color : "transparent"),
-                      color: (groupingMode ? isPending : isSelected) ? "#fff" : "#999",
-                      borderColor: color,
-                      borderStyle: groupingMode ? (isPending ? "solid" : "dashed") : "solid",
-                      opacity: groupingMode && !isPending ? 0.5 : 1,
-                    }}
-                  >
-                    {c} <span style={styles.chipCount}>({count})</span>
+                    onClick={() => { setGroupingMode((v) => !v); setPendingGroupMembers(new Set()); }}
+                    style={{ ...styles.miniBtn, borderColor: groupingMode ? "#FFD93D" : "#3d4555", color: groupingMode ? "#FFD93D" : "#8b949e", background: groupingMode ? "#FFD93D22" : "none" }}>
+                    ⊕ Group
                   </button>
-                );
-              })}
-            </div>
-          </div>
+                  <button onClick={() => csvInputRef.current?.click()}
+                    title="Import a CSV with combined_name + cluster column"
+                    style={{ ...styles.miniBtn }}>
+                    ⊕ CSV
+                  </button>
+                  <input ref={csvInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleCSVFileChange} />
+                  {pendingCSV && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#1f2a3a", border: "1px solid #457B9D", borderRadius: 6, padding: "3px 6px" }}>
+                      <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap" }}>Name:</span>
+                      <input autoFocus value={pendingCSVName}
+                        onChange={(e) => setPendingCSVName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") confirmPendingCSV(); if (e.key === "Escape") { setPendingCSV(null); setPendingCSVName(""); } }}
+                        style={{ width: 120, background: "transparent", border: "none", outline: "none", color: "#c9d1d9", fontSize: 11, fontFamily: "monospace" }} />
+                      <button onClick={confirmPendingCSV} style={{ ...styles.miniBtn, padding: "2px 8px", fontSize: 10, borderColor: "#457B9D", color: "#457B9D" }}>Add</button>
+                      <button onClick={() => { setPendingCSV(null); setPendingCSVName(""); }} style={{ ...styles.miniBtn, padding: "2px 6px", fontSize: 10 }}>✕</button>
+                    </div>
+                  )}
+                  {groupingMode && pendingGroupMembers.size >= 2 && (
+                    <button onClick={createGroup} style={{ ...styles.miniBtn, borderColor: "#6BCB77", color: "#6BCB77", background: "#6BCB7722" }}>
+                      ✓ Create ({pendingGroupMembers.size})
+                    </button>
+                  )}
+                </div>
+                <div style={styles.clusterChips}>
+                  {clusterGroups.map((g, gi) => {
+                    const groupColor = GROUP_COLORS[gi % GROUP_COLORS.length];
+                    const memberList = [...g.memberIds].sort((a, b) => a - b);
+                    const count = metadataData.filter((r) => memberList.includes(r[selectedK])).length;
+                    const allOn = memberList.every((c) => selectedClusters.has(c));
+                    return (
+                      <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                        <button
+                          onClick={() => setSelectedClusters((prev) => {
+                            const next = new Set(prev);
+                            if (allOn) memberList.forEach((c) => next.delete(c)); else memberList.forEach((c) => next.add(c));
+                            return next;
+                          })}
+                          style={{ ...styles.chip, backgroundColor: allOn ? groupColor : "transparent", color: allOn ? "#111" : "#999", borderColor: groupColor, fontWeight: 600 }}>
+                          {g.name}: {memberList.join("+")} <span style={styles.chipCount}>({count})</span>
+                        </button>
+                        <button onClick={() => deleteGroup(g.id)} style={{ ...styles.miniBtn, padding: "1px 5px", fontSize: 10, color: "#f85149", borderColor: "#f85149", lineHeight: 1 }}>×</button>
+                      </span>
+                    );
+                  })}
+                  {clusters.map((c, i) => {
+                    const inGroup = clusterToGroupIdx[String(c)] !== undefined;
+                    if (inGroup) return null;
+                    const count = metadataData.filter((r) => r[selectedK] === c).length;
+                    const isPending = pendingGroupMembers.has(c);
+                    const isSelected = selectedClusters.has(c);
+                    const color = getEffectiveClusterColor(c, i);
+                    return (
+                      <button key={c} onClick={() => groupingMode ? togglePending(c) : toggleCluster(c)}
+                        style={{
+                          ...styles.chip,
+                          backgroundColor: groupingMode ? (isPending ? color + "55" : "transparent") : (isSelected ? color : "transparent"),
+                          color: (groupingMode ? isPending : isSelected) ? "#fff" : "#999",
+                          borderColor: color,
+                          borderStyle: groupingMode ? (isPending ? "solid" : "dashed") : "solid",
+                          opacity: groupingMode && !isPending ? 0.5 : 1,
+                        }}>
+                        {c} <span style={styles.chipCount}>({count})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-          {/* Tab Content */}
-          <main style={styles.main}>
-            {activeTab === "profiles" && (
-              <ClusterProfiles
-                selectedK={selectedK}
-                clusters={clusters}
-                selectedClusters={selectedClusters}
-                clusterGroups={clusterGroups}
-                getEffectiveClusterColor={getEffectiveClusterColor}
-                customColMapping={customClusterCols[selectedK] ?? null}
-              />
-            )}
-            {activeTab === "timeseries" && (
-              <TimeSeriesView
-                selectedK={selectedK}
-                clusters={clusters}
-                selectedClusters={selectedClusters}
-                sensorClusterMap={sensorClusterMap}
-                sensorList={sensorList}
-                customColMapping={customClusterCols[selectedK] ?? null}
-              />
-            )}
-            {activeTab === "metadata" && (
-              <MetadataStats
-                metadataData={metadataData}
-                selectedK={selectedK}
-                clusters={clusters}
-                selectedClusters={selectedClusters}
-                getEffectiveClusterColor={getEffectiveClusterColor}
-                customClusterCols={customClusterCols}
-                onNavigateToBuilding={handleNavigateToBuilding}
-              />
-            )}
-            {activeTab === "map" && (
-              <MapView
-                metadataData={metadataData}
-                selectedK={selectedK}
-                clusters={clusters}
-                selectedClusters={selectedClusters}
-                sensorIdCol={sensorIdCol}
-                clusterGroups={clusterGroups}
-                getEffectiveClusterColor={getEffectiveClusterColor}
-                customClusterCols={customClusterCols}
-                navigateToBuilding={navigateToBuilding}
-              />
-            )}
-            {activeTab === "deghours" && (
-              <DegreeHoursMap metadataData={metadataData} />
-            )}
-            {activeTab === "homogeneity" && (
-              <BuildingHomogeneity
-                metadataData={metadataData}
-                selectedK={selectedK}
-                clusters={clusters}
-                getEffectiveClusterColor={getEffectiveClusterColor}
-                onNavigateToBuilding={handleNavigateToBuilding}
-              />
-            )}
-          </main>
-        </>
-      )}
+            {/* Tab content */}
+            <main style={{
+              flex: 1,
+              minHeight: 0,
+              overflow: activeTab === "deghours" ? "hidden" : "auto",
+              padding: activeTab === "deghours" ? 0 : 24,
+            }}>
+              {activeTab === "profiles" && (
+                <ClusterProfiles
+                  selectedK={selectedK}
+                  clusters={clusters}
+                  selectedClusters={selectedClusters}
+                  clusterGroups={clusterGroups}
+                  getEffectiveClusterColor={getEffectiveClusterColor}
+                  customColMapping={customClusterCols[selectedK] ?? null}
+                />
+              )}
+              {activeTab === "timeseries" && (
+                <TimeSeriesView
+                  selectedK={selectedK}
+                  clusters={clusters}
+                  selectedClusters={selectedClusters}
+                  sensorClusterMap={sensorClusterMap}
+                  sensorList={sensorList}
+                  customColMapping={customClusterCols[selectedK] ?? null}
+                />
+              )}
+              {activeTab === "metadata" && (
+                <MetadataStats
+                  metadataData={metadataData}
+                  selectedK={selectedK}
+                  clusters={clusters}
+                  selectedClusters={selectedClusters}
+                  getEffectiveClusterColor={getEffectiveClusterColor}
+                  customClusterCols={customClusterCols}
+                  onNavigateToBuilding={handleNavigateToBuilding}
+                />
+              )}
+              {activeTab === "map" && (
+                <MapView
+                  metadataData={metadataData}
+                  selectedK={selectedK}
+                  clusters={clusters}
+                  selectedClusters={selectedClusters}
+                  sensorIdCol={sensorIdCol}
+                  clusterGroups={clusterGroups}
+                  getEffectiveClusterColor={getEffectiveClusterColor}
+                  customClusterCols={customClusterCols}
+                  navigateToBuilding={navigateToBuilding}
+                />
+              )}
+              {activeTab === "deghours" && (
+                <DegreeHoursMap metadataData={metadataData} />
+              )}
+              {activeTab === "homogeneity" && (
+                <BuildingHomogeneity
+                  metadataData={metadataData}
+                  selectedK={selectedK}
+                  clusters={clusters}
+                  getEffectiveClusterColor={getEffectiveClusterColor}
+                  onNavigateToBuilding={handleNavigateToBuilding}
+                />
+              )}
+            </main>
+          </>
+        )}
+      </div>
     </div>
   );
 }

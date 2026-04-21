@@ -40,14 +40,26 @@ function dhToColor(value, max) {
 }
 
 const FIELD_META = {
-  "dh_2018":       { label: "2018",      group: "year",      unit: "°Ch" },
-  "dh_2024":       { label: "2024",      group: "year",      unit: "°Ch" },
-  "dh_2025":       { label: "2025",      group: "year",      unit: "°Ch" },
-  "Kh above 26°C": { label: "Gradtimmar över 26°C", group: "threshold", unit: "°h" },
-  "Kh above 27°C": { label: "Gradtimmar över 27°C", group: "threshold", unit: "°h" },
-  "Kh above 28°C": { label: "Gradtimmar över 28°C", group: "threshold", unit: "°h" },
+  "dh_2018":       { label: "2018 (>26°C)", group: "year",      unit: "°h" },
+  "dh_2024":       { label: "2024 (>26°C)", group: "year",      unit: "°h" },
+  "dh_2025":       { label: "2025 (>26°C)", group: "year",      unit: "°h" },
+  "Kh above 26°C": { label: "2019 >26°C", group: "threshold", unit: "°h" },
+  "Kh above 27°C": { label: "2019 >27°C", group: "threshold", unit: "°h" },
+  "Kh above 28°C": { label: "2019 >28°C", group: "threshold", unit: "°h" },
   "tc_h":          { label: "tc_h",      group: "other",     unit: "h"   },
 };
+
+const FIELD_SHORT = {
+  "dh_2018":       "2018",
+  "dh_2024":       "2024",
+  "dh_2025":       "2025",
+  "Kh above 26°C": ">26°C",
+  "Kh above 27°C": ">27°C",
+  "Kh above 28°C": ">28°C",
+  "tc_h":          "tc_h",
+};
+
+const FIELD_ORDER = Object.keys(FIELD_META);
 
 const FIELD_COLORS = ["#E9C46A", "#4CC9F0", "#FF6B9D", "#6BCB77", "#C8B6FF"];
 
@@ -150,9 +162,9 @@ export default function DegreeHoursMap({ metadataData }) {
   const [activeCueIdx, setActiveCueIdx]   = useState(-1);
   const [sequencerAuto, setSequencerAuto] = useState(false);
   const [sequencerLoop, setSequencerLoop] = useState(false);
-  const [showSequencer, setShowSequencer] = useState(false);
+  const [openPopover, setOpenPopover]     = useState(null);
   const [presentMode, setPresentMode]     = useState(false);
-  const [widescreen, setWidescreen]       = useState(false);
+  const popoverRef                        = useRef(null);
   const holdTimerRef                      = useRef(null);
   const transitionTimerRef                = useRef(null);
 
@@ -171,7 +183,10 @@ export default function DegreeHoursMap({ metadataData }) {
     fetchJson(`${API}/api/dh-fields`)
       .then((fields) => {
         setAvailableFields(fields);
-        const preferred = fields.find((f) => f.field === "dh_2018");
+        const preferred = fields.find((f) => f.field === "dh_2025")
+          ?? fields.find((f) => f.field === "dh_2024")
+          ?? fields.find((f) => f.field === "dh_2018")
+          ?? fields[0];
         if (preferred) setSelectedFields([preferred.field]);
       })
       .catch(console.error);
@@ -495,7 +510,7 @@ export default function DegreeHoursMap({ metadataData }) {
           const parsed = JSON.parse(ev.target.result);
           setCues(parsed);
           setActiveCueIdx(-1);
-          setShowSequencer(true);
+          setOpenPopover("rig");
           _flashMsg(`✓ Loaded ${parsed.length} cue${parsed.length !== 1 ? 's' : ''} from ${file.name}`);
         } catch (err) {
           console.error("Load failed", err);
@@ -512,7 +527,7 @@ export default function DegreeHoursMap({ metadataData }) {
       const n = prev.length + 1;
       return [...prev, { ...captureState(), label: `Cue ${n}` }];
     });
-    setShowSequencer(true);
+    setOpenPopover("rig");
   }, [captureState]);
 
   const cuesRef = useRef(cues);
@@ -575,6 +590,19 @@ export default function DegreeHoursMap({ metadataData }) {
   // ── Effective cutoff (null = no filtering) ──
   const activeCutoff = outlierActive && outlierCutoff != null ? outlierCutoff : null;
 
+  // ── Max value across ALL loaded fields — keeps color scale fixed when comparing years ──
+  const globalMaxValue = useMemo(() => {
+    let max = 0;
+    Object.values(fieldCache).forEach((data) => {
+      if (data) data.forEach((d) => {
+        const v = d.value;
+        if (activeCutoff !== null && v > activeCutoff) return;
+        if (v > max) max = v;
+      });
+    });
+    return max || 1;
+  }, [fieldCache, activeCutoff]);
+
   // ── Max value for color/height scale (respects outlier filter) ──
   const maxValue = useMemo(() => {
     let max = 0;
@@ -583,7 +611,7 @@ export default function DegreeHoursMap({ metadataData }) {
       if (data) {
         data.forEach((d) => {
           const v = d.value;
-          if (activeCutoff !== null && v > activeCutoff) return; // skip outlier
+          if (activeCutoff !== null && v > activeCutoff) return;
           if (v > max) max = v;
         });
       }
@@ -612,7 +640,7 @@ export default function DegreeHoursMap({ metadataData }) {
       data.forEach((d) => {
         const v = d.value;
         if (activeCutoff !== null && v > activeCutoff) return;
-        const bid = pointHeights[d.sensor_id]?.lm_building_id;
+        const bid = d.lm_building_id;
         if (!bid) return;
         if (!groups[bid]) groups[bid] = [];
         groups[bid].push(v);
@@ -623,7 +651,7 @@ export default function DegreeHoursMap({ metadataData }) {
       result[bid] = vals.reduce((a, b) => a + b, 0) / vals.length;
     });
     return result;
-  }, [buildingView, selectedFields, fieldCache, activeCutoff, pointHeights]);
+  }, [buildingView, selectedFields, fieldCache, activeCutoff]);
 
   const activeBuildingCutoff = buildingView && buildingOutlierActive && buildingOutlierCutoff != null
     ? buildingOutlierCutoff : null;
@@ -678,7 +706,7 @@ export default function DegreeHoursMap({ metadataData }) {
             const val = buildingDhValues[bid];
             if (val == null) return [45, 60, 90, 70];
             if (activeBuildingCutoff !== null && val > activeBuildingCutoff) return [45, 60, 90, 40];
-            return [...dhToColor(val, buildingMaxValue), 230];
+            return [...dhToColor(val, globalMaxValue), 230];
           },
           getLineColor: [0, 0, 0, 0],
           lineWidthMinPixels: 0,
@@ -707,14 +735,11 @@ export default function DegreeHoursMap({ metadataData }) {
       );
     }
 
-    const LON_PER_M = 1 / 59400; // at ~57.7°N
-    const gap = radius * 2.5 + 2;
-
-    if (!buildingView) selectedFields.forEach((field, idx) => {
+    if (!buildingView) selectedFields.forEach((field) => {
       const data = fieldCache[field];
       if (!data?.length) return;
 
-      const lonOffset = idx * gap * LON_PER_M;
+      const lonOffset = 0;
       const visible = data.filter((d) => activeCutoff === null || d.value <= activeCutoff);
 
       ls.push(
@@ -728,17 +753,17 @@ export default function DegreeHoursMap({ metadataData }) {
             return [lon + lonOffset, lat];
           },
           getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
-          getFillColor: (d) => [...dhToColor(d.value, maxValue), 230],
-          getLineColor: (d) => [...dhToColor(d.value, maxValue), 80],
+          getFillColor: (d) => [...dhToColor(d.value, globalMaxValue), 230],
+          getLineColor: (d) => [...dhToColor(d.value, globalMaxValue), 80],
           radius,
           diskResolution: 18,
           extruded: true,
           stroked: false,
           pickable: true,
           updateTriggers: {
-            getPosition:  [useParquetCoords, pointHeights, lonOffset],
+            getPosition:  [useParquetCoords, pointHeights],
             getElevation: [baseH, heightScale],
-            getFillColor: [maxValue],
+            getFillColor: [globalMaxValue],
           },
         })
       );
@@ -749,7 +774,7 @@ export default function DegreeHoursMap({ metadataData }) {
     buildingView, buildingDhValues, buildingMaxValue, activeBuildingCutoff,
     showBuildings, buildingWireframe, buildings3D,
     selectedFields, fieldCache,
-    heightScale, radius, maxValue, baseH,
+    heightScale, radius, maxValue, globalMaxValue, baseH,
     activeCutoff,
     useParquetCoords, pointHeights,
   ]);
@@ -801,619 +826,507 @@ export default function DegreeHoursMap({ metadataData }) {
     return groups;
   }, [availableFields]);
 
+  useEffect(() => {
+    if (!openPopover) return;
+    const handler = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setOpenPopover(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [openPopover]);
+
   const s = styles;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, ...(presentMode ? { paddingBottom: 40 } : { height: "calc(100vh - 220px)", minHeight: 520 }) }}>
-      {/* ── Controls row 1: field selection ── */}
-      {!presentMode && <div style={s.controlBar}>
-        {fieldGroups.year.length > 0 && (
-          <div style={s.controlGroup}>
-            <span style={s.label}>Year</span>
-            {fieldGroups.year.map((f) => {
-              const active = selectedFields.includes(f);
-              const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
-              return (
-                <button key={f} onClick={() => toggleField(f)} style={{
-                  ...s.btn,
-                  borderColor: active ? color : "#3d4555",
-                  color: active ? color : "#8b949e",
-                  background: active ? `${color}22` : "none",
-                  fontWeight: active ? 700 : 400,
-                }}>
-                  {FIELD_META[f]?.label ?? f}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {fieldGroups.year.length > 0 && <div style={s.sep} />}
-
-        {fieldGroups.threshold.length > 0 && (
-          <div style={s.controlGroup}>
-            <span style={s.label}>Threshold</span>
-            {fieldGroups.threshold.map((f) => {
-              const active = selectedFields.includes(f);
-              const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
-              return (
-                <button key={f} onClick={() => toggleField(f)} style={{
-                  ...s.btn,
-                  borderColor: active ? color : "#3d4555",
-                  color: active ? color : "#8b949e",
-                  background: active ? `${color}22` : "none",
-                  fontWeight: active ? 700 : 400,
-                }}>
-                  {FIELD_META[f]?.label ?? f}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {fieldGroups.threshold.length > 0 && <div style={s.sep} />}
-
-        {fieldGroups.other.map((f) => {
-          const active = selectedFields.includes(f);
-          const color = FIELD_COLORS[selectedFields.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
-          return (
-            <button key={f} onClick={() => toggleField(f)} style={{
-              ...s.btn,
-              borderColor: active ? color : "#3d4555",
-              color: active ? color : "#8b949e",
-              background: active ? `${color}22` : "none",
-            }}>
-              {FIELD_META[f]?.label ?? f}
-            </button>
-          );
-        })}
-      </div>}
-
-      {/* ── Controls row 2: display options ── */}
-      {!presentMode && <div style={s.controlBar}>
-        {/* Outlier filter */}
-        <div style={s.controlGroup}>
-          <button
-            onClick={() => setOutlierActive((v) => !v)}
-            style={{
-              ...s.btn,
-              borderColor: outlierActive ? "#f85149" : "#3d4555",
-              color: outlierActive ? "#f85149" : "#8b949e",
-              background: outlierActive ? "#f8514922" : "none",
-            }}
-          >
-            ⚠ Outlier filter
-          </button>
-          <span style={s.label}>cutoff</span>
-          <input
-            value={outlierInput}
-            onChange={(e) => setOutlierInput(e.target.value)}
-            onBlur={applyOutlierInput}
-            onKeyDown={(e) => e.key === "Enter" && applyOutlierInput()}
-            style={{ ...s.numInput, width: 60 }}
-            placeholder="value"
-            title="Sensors above this value are hidden. Color & height scale recalculated."
-          />
-          {outlierActive && outlierCount > 0 && (
-            <span style={{ fontSize: 10, color: "#f85149" }}>
-              {outlierCount} hidden
-            </span>
-          )}
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Height scale */}
-        <div style={s.controlGroup}>
-          <span style={s.label}>Height ×{heightScale.toFixed(1)}</span>
-          <input type="range" min={0.1} max={25} step={0.1} value={heightScale}
-            onChange={(e) => setHeightScale(Number(e.target.value))}
-            style={{ width: 160, accentColor: "#E9C46A", cursor: "pointer" }} />
-        </div>
-
-        {/* Radius */}
-        <div style={s.controlGroup}>
-          <span style={s.label}>r {radius}m</span>
-          <input type="range" min={2} max={20} step={1} value={radius}
-            onChange={(e) => setRadius(Number(e.target.value))}
-            style={{ width: 60, accentColor: "#58a6ff", cursor: "pointer" }} />
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Parquet coords */}
-        <button
-          onClick={() => setUseParquetCoords((v) => !v)}
-          style={{
-            ...s.btn,
-            borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555",
-            color: useParquetCoords ? "#4CC9F0" : "#8b949e",
-            background: useParquetCoords ? "#4CC9F022" : "none",
-          }}
-          title="Use refined sensor coordinates from parquet file"
-        >
-          ⌖ Parquet coords
-        </button>
-
-        {/* Buildings */}
-        <button
-          onClick={() => setShowBuildings((v) => !v)}
-          style={{
-            ...s.btn,
-            borderColor: showBuildings ? "#6BCB77" : "#3d4555",
-            color: showBuildings ? "#6BCB77" : "#8b949e",
-            background: showBuildings ? "#6BCB7722" : "none",
-          }}
-        >
-          ▦ Bldgs
-        </button>
-        {showBuildings && (
-          <button
-            onClick={() => setBuildingWireframe((v) => !v)}
-            title="Toggle building wireframe / solid"
-            style={{
-              ...s.btn,
-              borderColor: buildingWireframe ? "#88AADD" : "#3d4555",
-              color: buildingWireframe ? "#88AADD" : "#8b949e",
-              background: buildingWireframe ? "#88AADD22" : "none",
-            }}
-          >
-            ⬡ Wire
-          </button>
-        )}
-        <button
-          onClick={() => setBuildingView((v) => !v)}
-          title="Color whole building bodies by per-building degree-hour average (outlier filter applied)"
-          style={{
-            ...s.btn,
-            borderColor: buildingView ? "#E9C46A" : "#3d4555",
-            color: buildingView ? "#E9C46A" : "#8b949e",
-            background: buildingView ? "#E9C46A22" : "none",
-          }}
-        >
-          ⬛ Bldg avg
-        </button>
-        {buildingView && (
-          <div style={s.controlGroup}>
-            <button
-              onClick={() => setBuildingOutlierActive((v) => !v)}
-              style={{
-                ...s.btn,
-                borderColor: buildingOutlierActive ? "#f85149" : "#3d4555",
-                color: buildingOutlierActive ? "#f85149" : "#8b949e",
-                background: buildingOutlierActive ? "#f8514922" : "none",
-              }}
-              title="Hide buildings whose average exceeds this value and recalculate the color scale"
-            >
-              ⚠ Bldg cutoff
-            </button>
-            <input
-              value={buildingOutlierInput}
-              onChange={(e) => setBuildingOutlierInput(e.target.value)}
-              onBlur={applyBuildingOutlierInput}
-              onKeyDown={(e) => e.key === "Enter" && applyBuildingOutlierInput()}
-              style={{ ...s.numInput, width: 60 }}
-              placeholder="value"
-            />
-            {buildingOutlierActive && buildingOutlierCount > 0 && (
-              <span style={{ fontSize: 10, color: "#f85149" }}>
-                {buildingOutlierCount} hidden
-              </span>
-            )}
-          </div>
-        )}
-
-        <div style={s.sep} />
-
-        {/* Camera rotation */}
-        <div style={s.controlGroup}>
-          <button onClick={() => setIsRotating((v) => !v)}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isRotating ? "#E9C46A" : "#3d4555", color: isRotating ? "#E9C46A" : "#8b949e", background: isRotating ? "#E9C46A22" : "none" }}
-            title="Rotate camera continuously">
-            {isRotating ? "⏸ Rotate" : "↻ Rotate"}
-          </button>
-          {[0.1, 0.3, 1, 3].map((spd) => (
-            <button key={spd} onClick={() => setRotateSpeed(spd)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: rotateSpeed === spd ? "#E9C46A" : "#3d4555", color: rotateSpeed === spd ? "#E9C46A" : "#8b949e", background: rotateSpeed === spd ? "#E9C46A22" : "none" }}>
-              {spd}×
-            </button>
-          ))}
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Camera zoom */}
-        <div style={s.controlGroup}>
-          <button onClick={() => { isZooming ? setIsZooming(false) : startZoom(); }}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZooming ? "#C8B6FF" : "#3d4555", color: isZooming ? "#C8B6FF" : "#8b949e", background: isZooming ? "#C8B6FF22" : "none" }}
-            title="Oscillating zoom in/out (20 s cycle)">
-            {isZooming ? "⏸ Zoom" : "⇱ Zoom"}
-          </button>
-          {[0.5, 1, 2].map((amp) => (
-            <button key={amp} onClick={() => setZoomAmp(amp)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomAmp === amp ? "#C8B6FF" : "#3d4555", color: zoomAmp === amp ? "#C8B6FF" : "#8b949e", background: zoomAmp === amp ? "#C8B6FF22" : "none" }}>
-              ±{amp}
-            </button>
-          ))}
-        </div>
-
-        {/* One-way zoom in */}
-        <div style={s.controlGroup}>
-          <button onClick={() => { isZoomIn ? setIsZoomIn(false) : startZoomIn(); }}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZoomIn ? "#C8B6FF" : "#3d4555", color: isZoomIn ? "#C8B6FF" : "#8b949e", background: isZoomIn ? "#C8B6FF22" : "none" }}
-            title="Zoom in one-way to a target magnification, then stops">
-            {isZoomIn ? "⏸ Zoom in" : "⊕ Zoom in"}
-          </button>
-          {[2, 3, 5, 10].map((f) => (
-            <button key={f} onClick={() => setZoomInFactor(f)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomInFactor === f ? "#C8B6FF" : "#3d4555", color: zoomInFactor === f ? "#C8B6FF" : "#8b949e", background: zoomInFactor === f ? "#C8B6FF22" : "none" }}>
-              {f}×
-            </button>
-          ))}
-          {[4000, 8000, 16000].map((d) => (
-            <button key={d} onClick={() => setZoomInDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomInDuration === d ? "#C8B6FF" : "#3d4555", color: zoomInDuration === d ? "#C8B6FF" : "#8b949e", background: zoomInDuration === d ? "#C8B6FF22" : "none" }}>
-              {d / 1000}s
-            </button>
-          ))}
-        </div>
-
-        {/* One-way zoom out */}
-        <div style={s.controlGroup}>
-          <button onClick={() => { isZoomOut ? setIsZoomOut(false) : startZoomOut(); }}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isZoomOut ? "#C8B6FF" : "#3d4555", color: isZoomOut ? "#C8B6FF" : "#8b949e", background: isZoomOut ? "#C8B6FF22" : "none" }}
-            title="Zoom out one-way, then stops">
-            {isZoomOut ? "⏸ Zoom out" : "⊖ Zoom out"}
-          </button>
-          {[2, 3, 5, 10].map((f) => (
-            <button key={f} onClick={() => setZoomOutFactor(f)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomOutFactor === f ? "#C8B6FF" : "#3d4555", color: zoomOutFactor === f ? "#C8B6FF" : "#8b949e", background: zoomOutFactor === f ? "#C8B6FF22" : "none" }}>
-              {f}×
-            </button>
-          ))}
-          {[4000, 8000, 16000].map((d) => (
-            <button key={d} onClick={() => setZoomOutDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: zoomOutDuration === d ? "#C8B6FF" : "#3d4555", color: zoomOutDuration === d ? "#C8B6FF" : "#8b949e", background: zoomOutDuration === d ? "#C8B6FF22" : "none" }}>
-              {d / 1000}s
-            </button>
-          ))}
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Tilt oscillate */}
-        <div style={s.controlGroup}>
-          <button onClick={() => { isTilting ? setIsTilting(false) : startTilt(); }}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isTilting ? "#FF6B9D" : "#3d4555", color: isTilting ? "#FF6B9D" : "#8b949e", background: isTilting ? "#FF6B9D22" : "none" }}
-            title="Oscillate camera pitch (15 s cycle)">
-            {isTilting ? "⏸ Tilt" : "⟂ Tilt"}
-          </button>
-          {[10, 20, 35].map((amp) => (
-            <button key={amp} onClick={() => setTiltAmp(amp)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: tiltAmp === amp ? "#FF6B9D" : "#3d4555", color: tiltAmp === amp ? "#FF6B9D" : "#8b949e", background: tiltAmp === amp ? "#FF6B9D22" : "none" }}>
-              ±{amp}°
-            </button>
-          ))}
-        </div>
-
-        {/* Tilt one-way sweep */}
-        <div style={s.controlGroup}>
-          <button onClick={() => { isSweeping ? setIsSweeping(false) : startSweep(); }}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isSweeping ? "#FF6B9D" : "#3d4555", color: isSweeping ? "#FF6B9D" : "#8b949e", background: isSweeping ? "#FF6B9D22" : "none" }}
-            title="One-way tilt to target pitch, then stops">
-            {isSweeping ? "⏸ Sweep" : "↓ Sweep"}
-          </button>
-          <span style={s.label}>→</span>
-          {[5, 30, 60, 75].map((t) => (
-            <button key={t} onClick={() => setSweepTarget(t)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: sweepTarget === t ? "#FF6B9D" : "#3d4555", color: sweepTarget === t ? "#FF6B9D" : "#8b949e", background: sweepTarget === t ? "#FF6B9D22" : "none" }}>
-              {t}°
-            </button>
-          ))}
-          {[5000, 10000, 20000].map((d) => (
-            <button key={d} onClick={() => setSweepDuration(d)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: sweepDuration === d ? "#FF6B9D" : "#3d4555", color: sweepDuration === d ? "#FF6B9D" : "#8b949e", background: sweepDuration === d ? "#FF6B9D22" : "none" }}>
-              {d / 1000}s
-            </button>
-          ))}
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Flyover — straight travel in bearing direction */}
-        <div style={s.controlGroup}>
-          <button onClick={() => setIsFlyover((v) => !v)}
-            style={{ ...s.btn, ...s.toggleBtn, borderColor: isFlyover ? "#6BCB77" : "#3d4555", color: isFlyover ? "#6BCB77" : "#8b949e", background: isFlyover ? "#6BCB7722" : "none" }}
-            title="Fly straight in current bearing direction — combine with Rotate to steer">
-            {isFlyover ? "⏸ Flyover" : "→ Flyover"}
-          </button>
-          {[10, 30, 100].map((spd) => (
-            <button key={spd} onClick={() => setFlyoverSpeed(spd)} style={{ ...s.btn, padding: "2px 6px", fontSize: 10, borderColor: flyoverSpeed === spd ? "#6BCB77" : "#3d4555", color: flyoverSpeed === spd ? "#6BCB77" : "#8b949e", background: flyoverSpeed === spd ? "#6BCB7722" : "none" }}>
-              {spd}m/s
-            </button>
-          ))}
-        </div>
-
-        <div style={s.sep} />
-
-        {/* Map style */}
-        <select value={mapStyleId} onChange={(e) => setMapStyleId(e.target.value)} style={s.select}>
-          {MAP_STYLES.map((ms) => <option key={ms.id} value={ms.id}>{ms.name}</option>)}
-        </select>
-
-        <div style={s.sep} />
-
-        {/* Sequencer toggle */}
-        <button onClick={() => setShowSequencer((v) => !v)}
-          style={{ ...s.btn, borderColor: showSequencer ? "#E9C46A" : "#3d4555", color: showSequencer ? "#E9C46A" : "#8b949e", background: showSequencer ? "#E9C46A22" : "none" }}>
-          ⬡ Sequencer {cues.length > 0 && `(${cues.length})`}
-        </button>
-        <button onClick={addCue}
-          style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}
-          title="Add current view and animation state as a new cue">
-          ⊕ Add cue
-        </button>
-        <button onClick={updateCue}
-          disabled={activeCueIdx < 0}
-          style={{ ...s.btn, borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}
-          title="Update the active cue with current view and animation state">
-          ⟳ Update cue
-        </button>
-        <button onClick={mergeView}
-          disabled={activeCueIdx < 0}
-          style={{ ...s.btn, borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}
-          title="Merge current viewport into the active cue, keeping all animation settings">
-          ⤵ Merge view
-        </button>
-
-        <div style={s.sep} />
-
-        <button onClick={() => setWidescreen((w) => !w)}
-          style={{ ...s.btn, borderColor: widescreen ? "#C8B6FF" : "#3d4555", color: widescreen ? "#C8B6FF" : "#8b949e", background: widescreen ? "#C8B6FF22" : "none" }}
-          title="Toggle 16:9 map aspect ratio">
-          ▬ 16:9
-        </button>
-        <button onClick={() => setPresentMode(true)}
-          style={{ ...s.btn, borderColor: "#C8B6FF", color: "#C8B6FF" }}
-          title="Hide controls for screen recording">
-          ⛶ Present
-        </button>
-      </div>}
-
-      {/* ── Present mode controls bar ── */}
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      {/* Present mode top bar */}
       {presentMode && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button
-            onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }}
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 30,
+          background: "rgba(16,20,28,0.95)", backdropFilter: "blur(8px)",
+          borderBottom: "1px solid #2e3440",
+          display: "flex", alignItems: "center", gap: 6, padding: "6px 12px" }}>
+          <button onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }}
             disabled={activeCueIdx <= 0}
-            style={{ ...s.presentBtn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>
-            ◀ Back
-          </button>
-          <button
-            onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
+            style={{ ...s.presentBtn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀ Back</button>
+          <button onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }}
             disabled={cues.length === 0}
-            style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>
-            Go ▶
-          </button>
-          <button
-            onClick={() => setSequencerAuto((v) => !v)}
+            style={{ ...s.presentBtn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</button>
+          <button onClick={() => setSequencerAuto((v) => !v)}
             style={{ ...s.presentBtn, borderColor: sequencerAuto ? "#6BCB77" : "#556677", color: sequencerAuto ? "#6BCB77" : "#8b949e" }}>
-            {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
-          </button>
+            {sequencerAuto ? "⏸ Auto" : "▷ Auto"}</button>
           <button
             onClick={() => { setIsRotating(false); setIsZooming(false); setIsZoomIn(false); setIsZoomOut(false); setIsTilting(false); setIsSweeping(false); setIsFlyover(false); cueTransitionRef.current = null; setIsTransitioning(false); }}
-            style={{ ...s.presentBtn, borderColor: "#f85149", color: "#f85149" }}>
-            ⏹ Pause
-          </button>
+            style={{ ...s.presentBtn, borderColor: "#f85149", color: "#f85149" }}>⏹ Pause</button>
           <div style={{ flex: 1 }} />
-          <button
-            onClick={() => goTo(0)}
-            disabled={cues.length === 0}
-            style={{ ...s.presentBtn, borderColor: "#8b949e", color: "#8b949e", opacity: cues.length === 0 ? 0.4 : 1 }}>
-            ⏮ Reset
-          </button>
-          <button
-            onClick={() => { goTo(0); setSequencerAuto(true); }}
-            disabled={cues.length === 0}
-            style={{ ...s.presentBtn, borderColor: "#4CC9F0", color: "#4CC9F0", opacity: cues.length === 0 ? 0.4 : 1 }}>
-            ↺ Replay
-          </button>
-          <button
-            onClick={() => setPresentMode(false)}
-            style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>
-            ✕ Exit
-          </button>
+          <button onClick={() => goTo(0)} disabled={cues.length === 0}
+            style={{ ...s.presentBtn, borderColor: "#8b949e", color: "#8b949e", opacity: cues.length === 0 ? 0.4 : 1 }}>⏮ Reset</button>
+          <button onClick={() => { goTo(0); setSequencerAuto(true); }} disabled={cues.length === 0}
+            style={{ ...s.presentBtn, borderColor: "#4CC9F0", color: "#4CC9F0", opacity: cues.length === 0 ? 0.4 : 1 }}>↺ Replay</button>
+          <button onClick={() => setPresentMode(false)}
+            style={{ ...s.presentBtn, borderColor: "#C8B6FF", color: "#C8B6FF" }}>✕ Exit</button>
         </div>
       )}
 
-      {/* ── Map (+ side sequencer in 16:9 mode) ── */}
-      <div style={widescreen && !presentMode && showSequencer
-        ? { display: "flex", flexDirection: "row", gap: 10, alignItems: "flex-start" }
-        : {}}>
-      <div style={widescreen
-        ? { position: "relative", flexShrink: 0, width: presentMode ? "calc(85vh * 16 / 9)" : "calc(55vh * 16 / 9)", aspectRatio: "16/9", borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }
-        : { position: "relative", flex: 1, minHeight: 300, borderRadius: 8, overflow: "hidden", border: "1px solid #2e3440" }}>
-        <DeckGL
-          viewState={viewState}
-          onViewStateChange={handleViewStateChange}
-          controller={{ maxPitch: 85 }}
-          layers={layers}
-          getTooltip={getTooltip}
-        >
-          <Map
-            key={mapStyleId}
-            mapStyle={resolveStyle(MAP_STYLES.find((ms) => ms.id === mapStyleId).url)}
-            mapboxAccessToken={MAPBOX_TOKEN}
-          />
-        </DeckGL>
+      {/* DeckGL fills everything */}
+      <DeckGL
+        viewState={viewState}
+        onViewStateChange={handleViewStateChange}
+        controller={{ maxPitch: 85 }}
+        layers={layers}
+        getTooltip={getTooltip}
+      >
+        <Map
+          key={mapStyleId}
+          mapStyle={resolveStyle(MAP_STYLES.find((ms) => ms.id === mapStyleId).url)}
+          mapboxAccessToken={MAPBOX_TOKEN}
+        />
+      </DeckGL>
 
-        {loading && <div style={s.overlay}>Loading degree hours…</div>}
-
-        {!loading && selectedFields.length === 0 && (
-          <div style={s.overlay}>Select a field above to visualise.</div>
-        )}
-
-        {/* Legend */}
-        {!loading && selectedFields.length > 0 && (
-          <div style={s.legend}>
-            {selectedFields.length === 1 && (
-              <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
-                {FIELD_META[selectedFields[0]]?.label ?? selectedFields[0]}
-                {buildingView && <span style={{ color: "#E9C46A", marginLeft: 6 }}>— building avg</span>}
-              </div>
-            )}
-            {/* Color bar */}
-            <div style={{
-              width: 210, height: 14, borderRadius: 4,
-              background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})`,
-            }} />
-            {buildingView ? (
-              <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
-                <span>0 °h</span>
-                <span>{Math.round(buildingMaxValue / 2).toLocaleString()} °h</span>
-                <span>{Math.round(buildingMaxValue).toLocaleString()} °h</span>
-              </div>
-            ) : (
-              <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
-                <span>0 °h</span>
-                <span>{Math.round(maxValue / 2).toLocaleString()} °h</span>
-                <span>{Math.round(maxValue).toLocaleString()} °h</span>
-              </div>
-            )}
-
-            {selectedFields.length > 1 && (
-              <div style={{ marginTop: 7, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {selectedFields.map((f, i) => (
-                  <span key={f} style={{ fontSize: 13, color: FIELD_COLORS[i % FIELD_COLORS.length], fontWeight: 700 }}>
-                    ▪ {FIELD_META[f]?.label ?? f}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-      </div>{/* ── end map container ── */}
-
-      {/* ── Sequencer Panel — right of map in 16:9 mode ── */}
-      {!presentMode && showSequencer && widescreen && (
-        <div style={{ ...s.sequencerPanel, flex: 1, minWidth: 280, maxWidth: 420, alignSelf: "stretch", overflowY: "auto", maxHeight: "55vh" }}>
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
-            <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700, marginRight: "auto" }}>⬡ Cue List</span>
-            {cueMsg && <span style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace", width: "100%" }}>{cueMsg}</span>}
-            <button onClick={saveCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}>💾</button>
-            <button onClick={loadCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }}>📂</button>
-            <button onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }} disabled={activeCueIdx <= 0} style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀</button>
-            <button onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }} disabled={cues.length === 0} style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</button>
-            <button onClick={() => setSequencerAuto((v) => !v)} style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>{sequencerAuto ? "⏸" : "▷"}</button>
-            <button onClick={() => setSequencerLoop((v) => !v)} style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }}>↺</button>
-          </div>
-          {cues.length === 0 && <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>No cues yet</div>}
-          {cues.map((cue, idx) => {
-            const isActive = idx === activeCueIdx;
-            const anims = [];
-            if (cue.rotate)  anims.push(`↻ ${cue.rotateSpeed}°/s`);
-            if (cue.zoom)    anims.push(`⇱ ±${cue.zoomAmp}`);
-            if (cue.zoomIn)  anims.push(`⊕ ${cue.zoomInFactor}×`);
-            if (cue.zoomOut) anims.push(`⊖ ${cue.zoomOutFactor}×`);
-            if (cue.tilt)    anims.push(`⟂ ±${cue.tiltAmp}°`);
-            if (cue.sweep)   anims.push(`↓ ${cue.sweepTarget}°`);
-            if (cue.flyover) anims.push(`→ ${cue.flyoverSpeed}m/s`);
-            if (!anims.length) anims.push("—");
-            return (
-              <div key={cue.id} onClick={() => goTo(idx)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderRadius: 5, cursor: "pointer", background: isActive ? "#E9C46A18" : "transparent", border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`, marginBottom: 3 }}>
-                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 16, textAlign: "right" }}>{idx + 1}</span>
-                <input value={cue.label} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))} style={{ ...s.numInput, flex: 1, background: "transparent", border: "1px solid transparent" }} onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }} onBlur={(e) => { e.target.style.borderColor = "transparent"; }} />
-                <span style={{ fontSize: 10, color: "#8b949e", whiteSpace: "nowrap" }}>{anims.join(" ")}</span>
-                <span style={{ fontSize: 10, color: "#556677" }}>f</span>
-                <input type="number" min={0} step={0.5} value={cue.fade ?? 0} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 32 }} />
-                <span style={{ fontSize: 10, color: "#556677" }}>h</span>
-                <input type="number" min={0} value={cue.hold} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 32 }} />
-                <button disabled={idx === 0} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 4px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
-                <button disabled={idx === cues.length - 1} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 4px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
-                <button onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }} style={{ ...s.btn, padding: "1px 5px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
-              </div>
-            );
-          })}
-        </div>
+      {loading && <div style={s.overlay}>Loading degree hours…</div>}
+      {!loading && selectedFields.length === 0 && (
+        <div style={s.overlay}>Select a field to visualise.</div>
       )}
-      </div>{/* ── end row wrapper ── */}
 
-      {/* ── Sequencer Panel (normal flow, non-16:9) ── */}
-      {!presentMode && showSequencer && !widescreen && (
-        <div style={s.sequencerPanel}>
-          {/* Header */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, borderBottom: "1px solid #2e3440", paddingBottom: 8 }}>
-            <span style={{ fontSize: 12, color: "#E9C46A", fontWeight: 700 }}>⬡ Cue List</span>
-            <div style={{ flex: 1 }} />
-            {cueMsg && <span style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace" }}>{cueMsg}</span>}
-            <button onClick={saveCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }} title="Save cue list">💾 Save</button>
-            <button onClick={loadCues} style={{ ...s.btn, borderColor: "#6BCB77", color: "#6BCB77" }} title="Load cue list">📂 Load</button>
-            <button onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }} disabled={activeCueIdx <= 0} style={{ ...s.btn, opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀ Back</button>
-            <button onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }} disabled={cues.length === 0} style={{ ...s.btn, borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</button>
-            <button onClick={() => setSequencerAuto((v) => !v)} style={{ ...s.btn, borderColor: sequencerAuto ? "#6BCB77" : "#3d4555", color: sequencerAuto ? "#6BCB77" : "#8b949e", background: sequencerAuto ? "#6BCB7722" : "none" }}>{sequencerAuto ? "⏸ Auto" : "▷ Auto"}</button>
-            <button onClick={() => setSequencerLoop((v) => !v)} style={{ ...s.btn, borderColor: sequencerLoop ? "#6BCB77" : "#3d4555", color: sequencerLoop ? "#6BCB77" : "#8b949e", background: sequencerLoop ? "#6BCB7722" : "none" }} title="Loop">↺ Loop</button>
+      {/* Legend — bottom left */}
+      {!loading && selectedFields.length > 0 && (
+        <div style={{ ...s.legend, top: "auto", bottom: 44, left: 14 }}>
+          {selectedFields.length === 1 && (
+            <div style={{ fontSize: 11, color: "#8b949e", marginBottom: 5 }}>
+              {FIELD_META[selectedFields[0]]?.label ?? selectedFields[0]}
+              {buildingView && <span style={{ color: "#E9C46A", marginLeft: 5 }}>— bldg avg</span>}
+            </div>
+          )}
+          <div style={{ width: 180, height: 10, borderRadius: 3,
+            background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})` }} />
+          <div style={{ display: "flex", justifyContent: "space-between", width: 180, marginTop: 2, fontSize: 10, color: "#556677" }}>
+            <span>0</span>
+            <span>{Math.round(globalMaxValue / 2).toLocaleString()}</span>
+            <span>{Math.round(globalMaxValue).toLocaleString()} °h</span>
           </div>
-          {cues.length === 0 && <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>No cues — click ⊕ Add cue to capture the current animation state</div>}
-          {cues.map((cue, idx) => {
-            const isActive = idx === activeCueIdx;
-            const anims = [];
-            if (cue.rotate)  anims.push(`↻ ${cue.rotateSpeed}°/s`);
-            if (cue.zoom)    anims.push(`⇱ ±${cue.zoomAmp}`);
-            if (cue.zoomIn)  anims.push(`⊕ ${cue.zoomInFactor}× ${cue.zoomInDuration/1000}s`);
-            if (cue.zoomOut) anims.push(`⊖ ${cue.zoomOutFactor}× ${cue.zoomOutDuration/1000}s`);
-            if (cue.tilt)    anims.push(`⟂ ±${cue.tiltAmp}°`);
-            if (cue.sweep)   anims.push(`↓ ${cue.sweepTarget}° ${cue.sweepDuration/1000}s`);
-            if (cue.flyover) anims.push(`→ ${cue.flyoverSpeed}m/s`);
-            if (!anims.length) anims.push("—");
-            return (
-              <div key={cue.id} onClick={() => goTo(idx)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 8px", borderRadius: 5, cursor: "pointer", background: isActive ? "#E9C46A18" : "transparent", border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`, marginBottom: 3 }}>
-                <span style={{ fontSize: 11, color: isActive ? "#E9C46A" : "#556677", minWidth: 18, textAlign: "right" }}>{idx + 1}</span>
-                <input value={cue.label} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))} style={{ ...s.numInput, width: 76, background: "transparent", border: "1px solid transparent" }} onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }} onBlur={(e) => { e.target.style.borderColor = "transparent"; }} />
-                <span style={{ flex: 1, fontSize: 10, color: "#8b949e", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{anims.join("  ")}</span>
-                <span style={{ fontSize: 10, color: "#556677" }}>fade</span>
-                <input type="number" min={0} step={0.5} value={cue.fade ?? 0} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 38 }} />
-                <span style={{ fontSize: 10, color: "#556677" }}>s</span>
-                <span style={{ fontSize: 10, color: "#556677", marginLeft: 3 }}>hold</span>
-                <input type="number" min={0} value={cue.hold} onClick={(e) => e.stopPropagation()} onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))} style={{ ...s.numInput, width: 38 }} />
-                <span style={{ fontSize: 10, color: "#556677" }}>s</span>
-                <button disabled={idx === 0} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 5px", opacity: idx === 0 ? 0.3 : 1 }}>↑</button>
-                <button disabled={idx === cues.length - 1} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }} style={{ ...s.btn, padding: "1px 5px", opacity: idx === cues.length-1 ? 0.3 : 1 }}>↓</button>
-                <button onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }} style={{ ...s.btn, padding: "1px 6px", borderColor: "#f85149", color: "#f85149" }}>✕</button>
-              </div>
-            );
-          })}
+          {selectedFields.length > 1 && (
+            <div style={{ marginTop: 5, display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {selectedFields.map((f, i) => (
+                <span key={f} style={{ fontSize: 10, color: FIELD_COLORS[i % FIELD_COLORS.length], fontWeight: 700 }}>
+                  ▪ {FIELD_META[f]?.label ?? f}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {!presentMode && <div style={{ fontSize: 11, color: "#556677" }}>
-        Pre-calculated summer degree-hours per sensor.
-        {activeCutoff !== null && ` Outlier filter active: hiding sensors above ${activeCutoff} — color scale recalculated from remaining data.`}
-        {selectedFields.length > 1 && " Multiple fields shown side-by-side (offset East)."}
-      </div>}
+      {/* Cue flash message */}
+      {cueMsg && (
+        <div style={{ position: "absolute", bottom: 48, left: "50%", transform: "translateX(-50%)",
+          background: "rgba(16,20,28,0.92)", border: "1px solid #2e3440", borderRadius: 6,
+          padding: "5px 12px", fontSize: 11, color: "#6BCB77", fontFamily: "monospace",
+          whiteSpace: "nowrap", zIndex: 25, pointerEvents: "none" }}>
+          {cueMsg}
+        </div>
+      )}
+
+      {/* ── Floating command strip ── */}
+      {!presentMode && (
+        <div ref={popoverRef} style={{ position: "absolute", top: 14, left: 14, right: 14, zIndex: 20,
+          display: "flex", alignItems: "flex-start", gap: 8 }}>
+
+          {/* Title block */}
+          <div style={{ background: "rgba(16,20,28,0.92)", backdropFilter: "blur(12px)",
+            border: "1px solid #2e3440", borderRadius: 6, padding: "5px 10px", flexShrink: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#e6edf3" }}>Degree Hours</div>
+            <div style={{ fontSize: 9, color: "#3d4555", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 1 }}>
+              {selectedFields.map((f) => FIELD_SHORT[f] ?? f).join(" · ") || "—"}
+              {outlierActive && outlierCutoff != null ? ` · ⚠${outlierCutoff}` : ""}
+            </div>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {/* Data chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Data"
+              value={[
+                selectedFields.length > 0 ? selectedFields.map((f) => FIELD_SHORT[f] ?? f).join("+") : "–",
+                outlierActive && outlierCutoff != null ? `⚠${outlierCutoff}` : null,
+                outlierActive && outlierCount > 0 ? `${outlierCount} hidden` : null,
+              ].filter(Boolean).join(" · ")}
+              active={openPopover === "data"}
+              onClick={() => setOpenPopover(openPopover === "data" ? null : "data")}
+            />
+            {openPopover === "data" && (
+              <Popover>
+                {fieldGroups.year.length > 0 && (
+                  <>
+                    <PopLabel>Year</PopLabel>
+                    <PopRow>
+                      {fieldGroups.year.map((f) => {
+                        const active = selectedFields.includes(f);
+                        const color = FIELD_COLORS[FIELD_ORDER.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+                        return (
+                          <ChipBtn key={f} onClick={() => toggleField(f)}
+                            style={{ borderColor: active ? color : "#3d4555", color: active ? color : "#8b949e", background: active ? `${color}22` : "none", fontWeight: active ? 700 : 400 }}>
+                            {FIELD_META[f]?.label ?? f}
+                          </ChipBtn>
+                        );
+                      })}
+                    </PopRow>
+                  </>
+                )}
+                {fieldGroups.threshold.length > 0 && (
+                  <>
+                    <PopLabel>Threshold</PopLabel>
+                    <PopRow>
+                      {fieldGroups.threshold.map((f) => {
+                        const active = selectedFields.includes(f);
+                        const color = FIELD_COLORS[FIELD_ORDER.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+                        return (
+                          <ChipBtn key={f} onClick={() => toggleField(f)}
+                            style={{ borderColor: active ? color : "#3d4555", color: active ? color : "#8b949e", background: active ? `${color}22` : "none", fontWeight: active ? 700 : 400 }}>
+                            {FIELD_SHORT[f] ?? FIELD_META[f]?.label ?? f}
+                          </ChipBtn>
+                        );
+                      })}
+                    </PopRow>
+                  </>
+                )}
+                {fieldGroups.other.length > 0 && (
+                  <>
+                    <PopLabel>Other</PopLabel>
+                    <PopRow>
+                      {fieldGroups.other.map((f) => {
+                        const active = selectedFields.includes(f);
+                        const color = FIELD_COLORS[FIELD_ORDER.indexOf(f) % FIELD_COLORS.length] ?? FIELD_COLORS[0];
+                        return (
+                          <ChipBtn key={f} onClick={() => toggleField(f)}
+                            style={{ borderColor: active ? color : "#3d4555", color: active ? color : "#8b949e", background: active ? `${color}22` : "none" }}>
+                            {FIELD_META[f]?.label ?? f}
+                          </ChipBtn>
+                        );
+                      })}
+                    </PopRow>
+                  </>
+                )}
+                <PopDivider />
+                <PopLabel>Sensor cutoff</PopLabel>
+                <PopRow>
+                  <ChipBtn onClick={() => setOutlierActive((v) => !v)}
+                    style={{ borderColor: outlierActive ? "#f85149" : "#3d4555", color: outlierActive ? "#f85149" : "#8b949e", background: outlierActive ? "#f8514922" : "none" }}>
+                    ⚠ Filter
+                  </ChipBtn>
+                  <input value={outlierInput} onChange={(e) => setOutlierInput(e.target.value)}
+                    onBlur={applyOutlierInput} onKeyDown={(e) => e.key === "Enter" && applyOutlierInput()}
+                    style={{ ...s.numInput, width: 60 }} placeholder="cutoff" />
+                  {outlierActive && outlierCount > 0 && (
+                    <span style={{ fontSize: 10, color: "#f85149" }}>{outlierCount} hidden</span>
+                  )}
+                </PopRow>
+                {buildingView && (
+                  <>
+                    <PopLabel>Building cutoff</PopLabel>
+                    <PopRow>
+                      <ChipBtn onClick={() => setBuildingOutlierActive((v) => !v)}
+                        style={{ borderColor: buildingOutlierActive ? "#f85149" : "#3d4555", color: buildingOutlierActive ? "#f85149" : "#8b949e", background: buildingOutlierActive ? "#f8514922" : "none" }}>
+                        ⚠ Filter
+                      </ChipBtn>
+                      <input value={buildingOutlierInput} onChange={(e) => setBuildingOutlierInput(e.target.value)}
+                        onBlur={applyBuildingOutlierInput} onKeyDown={(e) => e.key === "Enter" && applyBuildingOutlierInput()}
+                        style={{ ...s.numInput, width: 60 }} placeholder="cutoff" />
+                      {buildingOutlierActive && buildingOutlierCount > 0 && (
+                        <span style={{ fontSize: 10, color: "#f85149" }}>{buildingOutlierCount} hidden</span>
+                      )}
+                    </PopRow>
+                  </>
+                )}
+              </Popover>
+            )}
+          </div>
+
+          {/* Layers chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Layers"
+              value={[
+                showBuildings ? "Bldgs" : null,
+                buildingWireframe ? "Wire" : null,
+                buildingView ? "Avg" : null,
+              ].filter(Boolean).join(" · ") || "–"}
+              active={openPopover === "layers"}
+              onClick={() => setOpenPopover(openPopover === "layers" ? null : "layers")}
+            />
+            {openPopover === "layers" && (
+              <Popover>
+                <PopLabel>Buildings</PopLabel>
+                <PopRow>
+                  <ToggleChip active={showBuildings} color="#6BCB77" onClick={() => setShowBuildings((v) => !v)}>▦ Bldgs</ToggleChip>
+                  {showBuildings && (
+                    <ToggleChip active={buildingWireframe} color="#88AADD" onClick={() => setBuildingWireframe((v) => !v)}>⬡ Wire</ToggleChip>
+                  )}
+                  <ToggleChip active={buildingView} color="#E9C46A" onClick={() => setBuildingView((v) => !v)}>⬛ Bldg avg</ToggleChip>
+                </PopRow>
+                <PopLabel>Sensors</PopLabel>
+                <PopRow>
+                  <ToggleChip active={useParquetCoords} color="#4CC9F0" onClick={() => setUseParquetCoords((v) => !v)}>⌖ Parquet coords</ToggleChip>
+                </PopRow>
+                <PopDivider />
+                <PopLabel>Height ×{heightScale.toFixed(1)}</PopLabel>
+                <PopRow>
+                  <input type="range" min={0.1} max={25} step={0.1} value={heightScale}
+                    onChange={(e) => setHeightScale(Number(e.target.value))}
+                    style={{ width: 160, accentColor: "#E9C46A", cursor: "pointer" }} />
+                </PopRow>
+                <PopLabel>Radius {radius}m</PopLabel>
+                <PopRow>
+                  <input type="range" min={2} max={20} step={1} value={radius}
+                    onChange={(e) => setRadius(Number(e.target.value))}
+                    style={{ width: 80, accentColor: "#58a6ff", cursor: "pointer" }} />
+                </PopRow>
+                <PopDivider />
+                <PopLabel>Map style</PopLabel>
+                <PopRow>
+                  {MAP_STYLES.map((ms) => (
+                    <ChipBtn key={ms.id} onClick={() => setMapStyleId(ms.id)}
+                      style={{ borderColor: mapStyleId === ms.id ? "#4CC9F0" : "#3d4555", color: mapStyleId === ms.id ? "#4CC9F0" : "#8b949e", background: mapStyleId === ms.id ? "#4CC9F022" : "none" }}>
+                      {ms.name}
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+              </Popover>
+            )}
+          </div>
+
+          {/* Camera chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Camera"
+              value={[
+                isRotating ? `↻${rotateSpeed}` : null,
+                isZooming ? `⇱±${zoomAmp}` : null,
+                isZoomIn ? `⊕${zoomInFactor}×` : null,
+                isZoomOut ? `⊖${zoomOutFactor}×` : null,
+                isTilting ? `⟂±${tiltAmp}°` : null,
+                isSweeping ? `↓${sweepTarget}°` : null,
+                isFlyover ? `→${flyoverSpeed}m/s` : null,
+              ].filter(Boolean).join(" ") || "–"}
+              active={openPopover === "camera"}
+              onClick={() => setOpenPopover(openPopover === "camera" ? null : "camera")}
+            />
+            {openPopover === "camera" && (
+              <Popover>
+                <PopLabel>Rotate</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isRotating} color="#E9C46A" onClick={() => setIsRotating((v) => !v)}>
+                    {isRotating ? "⏸ Rot" : "↻ Rot"}
+                  </ToggleChip>
+                  {[0.1, 0.3, 1, 3].map((spd) => (
+                    <ChipBtn key={spd} onClick={() => setRotateSpeed(spd)}
+                      style={{ borderColor: rotateSpeed === spd ? "#E9C46A" : "#3d4555", color: rotateSpeed === spd ? "#E9C46A" : "#8b949e", background: rotateSpeed === spd ? "#E9C46A22" : "none" }}>
+                      {spd}×
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Zoom osc</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isZooming} color="#C8B6FF" onClick={() => { isZooming ? setIsZooming(false) : startZoom(); }}>
+                    {isZooming ? "⏸ Zoom" : "⇱ Zoom"}
+                  </ToggleChip>
+                  {[0.5, 1, 2].map((amp) => (
+                    <ChipBtn key={amp} onClick={() => setZoomAmp(amp)}
+                      style={{ borderColor: zoomAmp === amp ? "#C8B6FF" : "#3d4555", color: zoomAmp === amp ? "#C8B6FF" : "#8b949e", background: zoomAmp === amp ? "#C8B6FF22" : "none" }}>
+                      ±{amp}
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Zoom in</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isZoomIn} color="#C8B6FF" onClick={() => { isZoomIn ? setIsZoomIn(false) : startZoomIn(); }}>
+                    {isZoomIn ? "⏸ ZIn" : "⊕ ZIn"}
+                  </ToggleChip>
+                  {[2, 3, 5, 10].map((f) => (
+                    <ChipBtn key={f} onClick={() => setZoomInFactor(f)}
+                      style={{ borderColor: zoomInFactor === f ? "#C8B6FF" : "#3d4555", color: zoomInFactor === f ? "#C8B6FF" : "#8b949e", background: zoomInFactor === f ? "#C8B6FF22" : "none" }}>
+                      {f}×
+                    </ChipBtn>
+                  ))}
+                  {[4000, 8000, 16000].map((d) => (
+                    <ChipBtn key={d} onClick={() => setZoomInDuration(d)}
+                      style={{ borderColor: zoomInDuration === d ? "#C8B6FF" : "#3d4555", color: zoomInDuration === d ? "#C8B6FF" : "#8b949e", background: zoomInDuration === d ? "#C8B6FF22" : "none" }}>
+                      {d/1000}s
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Zoom out</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isZoomOut} color="#C8B6FF" onClick={() => { isZoomOut ? setIsZoomOut(false) : startZoomOut(); }}>
+                    {isZoomOut ? "⏸ ZOut" : "⊖ ZOut"}
+                  </ToggleChip>
+                  {[2, 3, 5, 10].map((f) => (
+                    <ChipBtn key={f} onClick={() => setZoomOutFactor(f)}
+                      style={{ borderColor: zoomOutFactor === f ? "#C8B6FF" : "#3d4555", color: zoomOutFactor === f ? "#C8B6FF" : "#8b949e", background: zoomOutFactor === f ? "#C8B6FF22" : "none" }}>
+                      {f}×
+                    </ChipBtn>
+                  ))}
+                  {[4000, 8000, 16000].map((d) => (
+                    <ChipBtn key={d} onClick={() => setZoomOutDuration(d)}
+                      style={{ borderColor: zoomOutDuration === d ? "#C8B6FF" : "#3d4555", color: zoomOutDuration === d ? "#C8B6FF" : "#8b949e", background: zoomOutDuration === d ? "#C8B6FF22" : "none" }}>
+                      {d/1000}s
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Tilt osc</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isTilting} color="#FF6B9D" onClick={() => { isTilting ? setIsTilting(false) : startTilt(); }}>
+                    {isTilting ? "⏸ Tilt" : "⟂ Tilt"}
+                  </ToggleChip>
+                  {[10, 20, 35].map((amp) => (
+                    <ChipBtn key={amp} onClick={() => setTiltAmp(amp)}
+                      style={{ borderColor: tiltAmp === amp ? "#FF6B9D" : "#3d4555", color: tiltAmp === amp ? "#FF6B9D" : "#8b949e", background: tiltAmp === amp ? "#FF6B9D22" : "none" }}>
+                      ±{amp}°
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Sweep</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isSweeping} color="#FF6B9D" onClick={() => { isSweeping ? setIsSweeping(false) : startSweep(); }}>
+                    {isSweeping ? "⏸ Sweep" : "↓ Sweep"}
+                  </ToggleChip>
+                  {[5, 30, 60, 75].map((t) => (
+                    <ChipBtn key={t} onClick={() => setSweepTarget(t)}
+                      style={{ borderColor: sweepTarget === t ? "#FF6B9D" : "#3d4555", color: sweepTarget === t ? "#FF6B9D" : "#8b949e", background: sweepTarget === t ? "#FF6B9D22" : "none" }}>
+                      {t}°
+                    </ChipBtn>
+                  ))}
+                  {[5000, 10000, 20000].map((d) => (
+                    <ChipBtn key={d} onClick={() => setSweepDuration(d)}
+                      style={{ borderColor: sweepDuration === d ? "#FF6B9D" : "#3d4555", color: sweepDuration === d ? "#FF6B9D" : "#8b949e", background: sweepDuration === d ? "#FF6B9D22" : "none" }}>
+                      {d/1000}s
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                <PopLabel>Flyover</PopLabel>
+                <PopRow>
+                  <ToggleChip active={isFlyover} color="#6BCB77" onClick={() => setIsFlyover((v) => !v)}>
+                    {isFlyover ? "⏸ Fly" : "→ Fly"}
+                  </ToggleChip>
+                  {[10, 30, 100].map((spd) => (
+                    <ChipBtn key={spd} onClick={() => setFlyoverSpeed(spd)}
+                      style={{ borderColor: flyoverSpeed === spd ? "#6BCB77" : "#3d4555", color: flyoverSpeed === spd ? "#6BCB77" : "#8b949e", background: flyoverSpeed === spd ? "#6BCB7722" : "none" }}>
+                      {spd}m/s
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+              </Popover>
+            )}
+          </div>
+
+          {/* Rig chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Rig"
+              value={cues.length > 0 ? `${cues.length} cues` : "–"}
+              active={openPopover === "rig"}
+              onClick={() => setOpenPopover(openPopover === "rig" ? null : "rig")}
+            />
+            {openPopover === "rig" && (
+              <Popover style={{ width: 320 }}>
+                <PopRow>
+                  <ChipBtn onClick={addCue} style={{ borderColor: "#6BCB77", color: "#6BCB77" }}>⊕ Add</ChipBtn>
+                  <ChipBtn onClick={updateCue} disabled={activeCueIdx < 0}
+                    style={{ borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}>
+                    ⟳ Update
+                  </ChipBtn>
+                  <ChipBtn onClick={mergeView} disabled={activeCueIdx < 0}
+                    style={{ borderColor: activeCueIdx >= 0 ? "#4CC9F0" : "#3d4555", color: activeCueIdx >= 0 ? "#4CC9F0" : "#556677", opacity: activeCueIdx < 0 ? 0.5 : 1 }}>
+                    ⤵ Merge
+                  </ChipBtn>
+                </PopRow>
+                <PopDivider />
+                <PopRow>
+                  <ToggleChip active={sequencerAuto} color="#6BCB77" onClick={() => setSequencerAuto((v) => !v)}>
+                    {sequencerAuto ? "⏸ Auto" : "▷ Auto"}
+                  </ToggleChip>
+                  <ToggleChip active={sequencerLoop} color="#6BCB77" onClick={() => setSequencerLoop((v) => !v)}>↺ Loop</ToggleChip>
+                  <ChipBtn onClick={() => { const prev = activeCueIdx - 1; if (prev >= 0) goTo(prev); }} disabled={activeCueIdx <= 0}
+                    style={{ opacity: activeCueIdx <= 0 ? 0.4 : 1 }}>◀</ChipBtn>
+                  <ChipBtn onClick={() => { const next = activeCueIdx + 1; if (next < cues.length) goTo(next); else if (cues.length > 0) goTo(0); }} disabled={cues.length === 0}
+                    style={{ borderColor: "#E9C46A", color: "#E9C46A", opacity: cues.length === 0 ? 0.4 : 1 }}>Go ▶</ChipBtn>
+                  <ChipBtn
+                    onClick={() => { setIsRotating(false); setIsZooming(false); setIsZoomIn(false); setIsZoomOut(false); setIsTilting(false); setIsSweeping(false); setIsFlyover(false); cueTransitionRef.current = null; setIsTransitioning(false); }}
+                    style={{ borderColor: "#f85149", color: "#f85149" }}>⏸</ChipBtn>
+                  <ChipBtn onClick={() => goTo(0)} disabled={cues.length === 0}
+                    style={{ opacity: cues.length === 0 ? 0.4 : 1 }}>⏮</ChipBtn>
+                </PopRow>
+                <div style={{ maxHeight: 240, overflowY: "auto", marginTop: 2 }}>
+                  {cues.length === 0 && (
+                    <div style={{ color: "#556677", fontSize: 11, textAlign: "center", padding: "8px 0" }}>
+                      No cues — click ⊕ Add to capture current state
+                    </div>
+                  )}
+                  {cues.map((cue, idx) => {
+                    const isActive = idx === activeCueIdx;
+                    const anims = [];
+                    if (cue.rotate)  anims.push(`↻${cue.rotateSpeed}`);
+                    if (cue.zoom)    anims.push(`⇱±${cue.zoomAmp}`);
+                    if (cue.zoomIn)  anims.push(`⊕${cue.zoomInFactor}×`);
+                    if (cue.zoomOut) anims.push(`⊖${cue.zoomOutFactor}×`);
+                    if (cue.tilt)    anims.push(`⟂±${cue.tiltAmp}°`);
+                    if (cue.sweep)   anims.push(`↓${cue.sweepTarget}°`);
+                    if (cue.flyover) anims.push(`→${cue.flyoverSpeed}`);
+                    if (!anims.length) anims.push("—");
+                    return (
+                      <div key={cue.id} onClick={() => goTo(idx)}
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 6px", borderRadius: 4,
+                                 cursor: "pointer", background: isActive ? "#E9C46A18" : "transparent",
+                                 border: `1px solid ${isActive ? "#E9C46A55" : "transparent"}`, marginBottom: 2 }}>
+                        <span style={{ fontSize: 10, color: isActive ? "#E9C46A" : "#556677", minWidth: 14, textAlign: "right" }}>{idx + 1}</span>
+                        <input value={cue.label} onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, label: e.target.value } : c))}
+                          style={{ ...s.numInput, flex: 1, background: "transparent", border: "1px solid transparent", padding: "1px 4px" }}
+                          onFocus={(e) => { e.target.style.borderColor = "#3d4555"; }}
+                          onBlur={(e) => { e.target.style.borderColor = "transparent"; }} />
+                        <span style={{ fontSize: 9, color: "#556677", whiteSpace: "nowrap" }}>{anims.join(" ")}</span>
+                        <span style={{ fontSize: 9, color: "#3d4555" }}>f</span>
+                        <input type="number" min={0} step={0.5} value={cue.fade ?? 0}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, fade: Math.max(0, Number(e.target.value)) } : c))}
+                          style={{ ...s.numInput, width: 28, padding: "1px 3px" }} />
+                        <span style={{ fontSize: 9, color: "#3d4555" }}>h</span>
+                        <input type="number" min={0} value={cue.hold}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setCues((prev) => prev.map((c, i) => i === idx ? { ...c, hold: Math.max(0, Number(e.target.value)) } : c))}
+                          style={{ ...s.numInput, width: 28, padding: "1px 3px" }} />
+                        <button disabled={idx === 0} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx-1], a[idx]] = [a[idx], a[idx-1]]; if (activeCueIdx === idx) setActiveCueIdx(idx-1); else if (activeCueIdx === idx-1) setActiveCueIdx(idx); return a; }); }}
+                          style={{ ...s.btn, padding: "0 3px", opacity: idx === 0 ? 0.3 : 1, fontSize: 9 }}>↑</button>
+                        <button disabled={idx === cues.length - 1} onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = [...prev]; [a[idx], a[idx+1]] = [a[idx+1], a[idx]]; if (activeCueIdx === idx) setActiveCueIdx(idx+1); else if (activeCueIdx === idx+1) setActiveCueIdx(idx); return a; }); }}
+                          style={{ ...s.btn, padding: "0 3px", opacity: idx === cues.length-1 ? 0.3 : 1, fontSize: 9 }}>↓</button>
+                        <button onClick={(e) => { e.stopPropagation(); setCues((prev) => { const a = prev.filter((_, i) => i !== idx); if (activeCueIdx >= a.length) setActiveCueIdx(a.length - 1); return a; }); }}
+                          style={{ ...s.btn, padding: "0 4px", borderColor: "#f85149", color: "#f85149", fontSize: 9 }}>✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <PopDivider />
+                <PopRow>
+                  <ChipBtn onClick={saveCues} style={{ borderColor: "#6BCB77", color: "#6BCB77" }}>💾 Save</ChipBtn>
+                  <ChipBtn onClick={loadCues} style={{ borderColor: "#6BCB77", color: "#6BCB77" }}>📂 Load</ChipBtn>
+                  <ChipBtn onClick={() => setPresentMode(true)} style={{ borderColor: "#C8B6FF", color: "#C8B6FF" }}>⛶ Present</ChipBtn>
+                </PopRow>
+                {cueMsg && (
+                  <div style={{ fontSize: 10, color: "#6BCB77", fontFamily: "monospace", marginTop: 2 }}>{cueMsg}</div>
+                )}
+              </Popover>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Styles ──────────────────────────────────────────────────────
 const styles = {
-  controlBar: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
-    padding: "8px 12px",
-    background: "#161b22",
-    border: "1px solid #2e3440",
-    borderRadius: 8,
-  },
-  controlGroup: {
-    display: "flex",
-    alignItems: "center",
-    gap: 5,
-  },
-  label: {
-    fontSize: 10,
-    color: "#8b949e",
-    whiteSpace: "nowrap",
-  },
-  sep: {
-    width: 1,
-    height: 20,
-    background: "#2e3440",
-    flexShrink: 0,
-  },
   btn: {
     background: "none",
     border: "1px solid #3d4555",
@@ -1424,20 +1337,6 @@ const styles = {
     padding: "3px 9px",
     fontFamily: "monospace",
     lineHeight: 1.4,
-  },
-  toggleBtn: {
-    transition: "color 1s ease, border-color 1s ease, background 1s ease",
-  },
-  select: {
-    background: "#161b22",
-    border: "1px solid #3d4555",
-    borderRadius: 5,
-    color: "#c9d1d9",
-    cursor: "pointer",
-    fontFamily: "monospace",
-    fontSize: 11,
-    padding: "3px 8px",
-    outline: "none",
   },
   numInput: {
     background: "#1a1f2e",
@@ -1476,27 +1375,126 @@ const styles = {
     fontSize: 11,
     padding: "4px 10px",
   },
-  sequencerPanel: {
-    background: "#161b22",
-    border: "1px solid #2e3440",
-    borderRadius: 8,
-    padding: "10px 12px",
-    fontFamily: "monospace",
-    maxHeight: 280,
-    overflowY: "auto",
-  },
   legend: {
     position: "absolute",
-    top: 12,
-    left: 12,
     zIndex: 5,
     background: "rgba(22,27,34,0.88)",
     backdropFilter: "blur(4px)",
     border: "1px solid #2e3440",
     borderRadius: 10,
-    padding: "12px 18px",
+    padding: "10px 14px",
     fontFamily: "monospace",
     pointerEvents: "none",
-    fontSize: 15,
   },
 };
+
+// ─── Helper UI components (used only in DegreeHoursMap) ───────────
+
+function CommandChip({ label, value, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      background: active ? "rgba(76,201,240,0.12)" : "rgba(16,20,28,0.92)",
+      backdropFilter: "blur(12px)",
+      border: `1px solid ${active ? "#4CC9F0" : "#2e3440"}`,
+      borderRadius: 6,
+      color: active ? "#4CC9F0" : "#c9d1d9",
+      cursor: "pointer",
+      fontSize: 11,
+      fontFamily: "monospace",
+      padding: "5px 11px",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "flex-start",
+      gap: 2,
+      transition: "all 0.12s",
+      whiteSpace: "nowrap",
+    }}>
+      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>{label}</span>
+      {value && <span style={{ fontSize: 9, color: active ? "#88d8f0" : "#556677", letterSpacing: 0.2 }}>{value}</span>}
+    </button>
+  );
+}
+
+function Popover({ children, style }) {
+  return (
+    <div style={{
+      position: "absolute",
+      top: "calc(100% + 4px)",
+      right: 0,
+      background: "rgba(16,20,28,0.97)",
+      backdropFilter: "blur(12px)",
+      border: "1px solid #2e3440",
+      borderRadius: 6,
+      boxShadow: "0 16px 48px rgba(0,0,0,0.65)",
+      padding: "10px 12px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 7,
+      minWidth: 200,
+      zIndex: 30,
+      fontFamily: "monospace",
+      ...style,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function PopLabel({ children }) {
+  return (
+    <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: 0.8, color: "#556677", fontWeight: 600, marginTop: 2 }}>
+      {children}
+    </div>
+  );
+}
+
+function PopRow({ children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+      {children}
+    </div>
+  );
+}
+
+function PopDivider() {
+  return <div style={{ height: 1, background: "#2e3440", margin: "2px 0" }} />;
+}
+
+function ChipBtn({ children, onClick, disabled, style }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: "none",
+      border: "1px solid #3d4555",
+      borderRadius: 4,
+      color: "#8b949e",
+      cursor: disabled ? "default" : "pointer",
+      fontSize: 10,
+      fontFamily: "monospace",
+      padding: "2px 7px",
+      lineHeight: 1.4,
+      ...style,
+    }}>
+      {children}
+    </button>
+  );
+}
+
+function ToggleChip({ active, color, onClick, children }) {
+  return (
+    <button onClick={onClick} style={{
+      background: active ? `${color}22` : "none",
+      border: `1px solid ${active ? color : "#3d4555"}`,
+      borderRadius: 4,
+      color: active ? color : "#8b949e",
+      cursor: "pointer",
+      fontSize: 10,
+      fontFamily: "monospace",
+      padding: "2px 7px",
+      lineHeight: 1.4,
+      transition: "color 0.8s ease, border-color 0.8s ease, background 0.8s ease",
+    }}>
+      {children}
+    </button>
+  );
+}
+
