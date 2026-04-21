@@ -91,16 +91,14 @@ export default function DegreeHoursMap({ metadataData }) {
   const [radius, setRadius]                   = useState(3);
   const [showBuildings, setShowBuildings]     = useState(true);
   const [buildingWireframe, setBuildingWireframe] = useState(false);
+  const [buildingView, setBuildingView]       = useState(false);
+  const [buildingOutlierActive, setBuildingOutlierActive] = useState(true);
+  const [buildingOutlierCutoff, setBuildingOutlierCutoff] = useState(null);
+  const [buildingOutlierInput, setBuildingOutlierInput]   = useState("");
 
   // Parquet coordinates
   const [useParquetCoords, setUseParquetCoords] = useState(true);
   const [pointHeights, setPointHeights]         = useState({});
-
-  // Exploded building view
-  const [explodedView, setExplodedView]         = useState(false);
-  const [leanScale, setLeanScale]               = useState(5);    // metres outward per floor
-  const [spreadPositions, setSpreadPositions]   = useState({});
-  const [spreadLoading, setSpreadLoading]       = useState(false);
 
   // Camera animation
   const [isRotating, setIsRotating]   = useState(false);
@@ -182,14 +180,6 @@ export default function DegreeHoursMap({ metadataData }) {
   useEffect(() => {
     fetchJson(`${API}/api/point-heights`).then(setPointHeights).catch(() => {});
   }, []);
-
-  useEffect(() => {
-    if (!explodedView || Object.keys(spreadPositions).length > 0 || spreadLoading) return;
-    setSpreadLoading(true);
-    fetchJson(`${API}/api/spread-positions`)
-      .then((d) => { setSpreadPositions(d); setSpreadLoading(false); })
-      .catch(() => setSpreadLoading(false));
-  }, [explodedView]);
 
   useEffect(() => {
     fetchJson(`${API}/api/all-buildings`).then(setBuildings3D).catch(() => {});
@@ -612,6 +602,60 @@ export default function DegreeHoursMap({ metadataData }) {
     return n;
   }, [fieldCache, selectedFields, activeCutoff]);
 
+  // Per-building mean DH value (outlier filter applied)
+  const buildingDhValues = useMemo(() => {
+    if (!buildingView) return {};
+    const groups = {};
+    selectedFields.forEach((field) => {
+      const data = fieldCache[field];
+      if (!data?.length) return;
+      data.forEach((d) => {
+        const v = d.value;
+        if (activeCutoff !== null && v > activeCutoff) return;
+        const bid = pointHeights[d.sensor_id]?.lm_building_id;
+        if (!bid) return;
+        if (!groups[bid]) groups[bid] = [];
+        groups[bid].push(v);
+      });
+    });
+    const result = {};
+    Object.entries(groups).forEach(([bid, vals]) => {
+      result[bid] = vals.reduce((a, b) => a + b, 0) / vals.length;
+    });
+    return result;
+  }, [buildingView, selectedFields, fieldCache, activeCutoff, pointHeights]);
+
+  const activeBuildingCutoff = buildingView && buildingOutlierActive && buildingOutlierCutoff != null
+    ? buildingOutlierCutoff : null;
+
+  const buildingMaxValue = useMemo(() => {
+    const vals = Object.values(buildingDhValues).filter(
+      (v) => activeBuildingCutoff === null || v <= activeBuildingCutoff
+    );
+    return vals.length ? Math.max(...vals) : 1;
+  }, [buildingDhValues, activeBuildingCutoff]);
+
+  const buildingOutlierCount = useMemo(() => {
+    if (activeBuildingCutoff === null) return 0;
+    return Object.values(buildingDhValues).filter((v) => v > activeBuildingCutoff).length;
+  }, [buildingDhValues, activeBuildingCutoff]);
+
+  // Auto-suggest building cutoff at 99th percentile when building values arrive
+  useEffect(() => {
+    if (buildingOutlierCutoff !== null) return;
+    const vals = Object.values(buildingDhValues);
+    if (!vals.length) return;
+    const sorted = [...vals].sort((a, b) => a - b);
+    const suggested = Math.ceil(percentile(sorted, 99));
+    setBuildingOutlierCutoff(suggested);
+    setBuildingOutlierInput(String(suggested));
+  }, [buildingDhValues]);
+
+  const applyBuildingOutlierInput = () => {
+    const v = parseFloat(buildingOutlierInput);
+    if (!isNaN(v) && v > 0) setBuildingOutlierCutoff(v);
+  };
+
   // Auto-scale: max column ≈ 40 m
   const baseH = maxValue > 0 ? 40 / maxValue : 1;
 
@@ -619,7 +663,33 @@ export default function DegreeHoursMap({ metadataData }) {
   const layers = useMemo(() => {
     const ls = [];
 
-    if (showBuildings && buildings3D?.features?.length) {
+    if (buildingView && buildings3D?.features?.length) {
+      ls.push(
+        new GeoJsonLayer({
+          id: "dh-buildings-view",
+          data: buildings3D,
+          filled: true,
+          stroked: false,
+          extruded: true,
+          wireframe: false,
+          getElevation: (f) => f.properties?.height ?? 10,
+          getFillColor: (f) => {
+            const bid = f.properties?.lm_building_id;
+            const val = buildingDhValues[bid];
+            if (val == null) return [45, 60, 90, 70];
+            if (activeBuildingCutoff !== null && val > activeBuildingCutoff) return [45, 60, 90, 40];
+            return [...dhToColor(val, buildingMaxValue), 230];
+          },
+          getLineColor: [0, 0, 0, 0],
+          lineWidthMinPixels: 0,
+          material: { ambient: 0.4, diffuse: 0.6, shininess: 32, specularColor: [60, 60, 60] },
+          pickable: true,
+          updateTriggers: {
+            getFillColor: [buildingDhValues, buildingMaxValue, activeBuildingCutoff],
+          },
+        })
+      );
+    } else if (showBuildings && buildings3D?.features?.length) {
       ls.push(
         new GeoJsonLayer({
           id: "dh-buildings",
@@ -638,38 +708,13 @@ export default function DegreeHoursMap({ metadataData }) {
     }
 
     const LON_PER_M = 1 / 59400; // at ~57.7°N
-    const LAT_PER_M = 1 / 111000;
     const gap = radius * 2.5 + 2;
 
-    // Pre-compute building centroids for lean offset
-    const buildingCentroids = {};
-    if (explodedView) {
-      Object.entries(pointHeights).forEach(([sid, h]) => {
-        const bid = h.lm_building_id;
-        if (!bid) return;
-        if (!buildingCentroids[bid]) buildingCentroids[bid] = { sumLat: 0, sumLon: 0, n: 0 };
-        const sp = spreadPositions[sid];
-        const lat = (sp?.spread_lat != null) ? sp.spread_lat : h.lat;
-        const lon = (sp?.spread_lon != null) ? sp.spread_lon : h.lon;
-        if (lat != null && lon != null) {
-          buildingCentroids[bid].sumLat += lat;
-          buildingCentroids[bid].sumLon += lon;
-          buildingCentroids[bid].n++;
-        }
-      });
-      Object.values(buildingCentroids).forEach((c) => {
-        c.lat = c.sumLat / c.n;
-        c.lon = c.sumLon / c.n;
-      });
-    }
-
-    selectedFields.forEach((field, idx) => {
+    if (!buildingView) selectedFields.forEach((field, idx) => {
       const data = fieldCache[field];
       if (!data?.length) return;
 
       const lonOffset = idx * gap * LON_PER_M;
-
-      // Filter outliers
       const visible = data.filter((d) => activeCutoff === null || d.value <= activeCutoff);
 
       ls.push(
@@ -678,37 +723,8 @@ export default function DegreeHoursMap({ metadataData }) {
           data: visible,
           getPosition: (d) => {
             const h = pointHeights[d.sensor_id];
-            const sp = spreadPositions[d.sensor_id];
-
-            let lat, lon;
-            if (explodedView && sp?.spread_lat != null) {
-              lat = sp.spread_lat;
-              lon = sp.spread_lon;
-            } else {
-              lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
-              lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
-            }
-
-            // Lean outward from building centroid by floor × leanScale, clamped to boundary
-            if (explodedView && leanScale > 0 && h?.lm_building_id) {
-              const cent = buildingCentroids[h.lm_building_id];
-              const floor = h.floor ?? 0;
-              if (cent && floor > 0) {
-                const dLat = lat - cent.lat;
-                const dLon = lon - cent.lon;
-                const dist = Math.sqrt(dLat * dLat + dLon * dLon);
-                const maxM = sp?.lean_max_m ?? 0;
-                if (maxM <= 0) return [lon + lonOffset, lat]; // no polygon data — skip lean
-                const offsetM = Math.min(floor * leanScale, maxM);
-                if (dist > 1e-9) {
-                  lat += (dLat / dist) * offsetM * LAT_PER_M;
-                  lon += (dLon / dist) * offsetM * LON_PER_M;
-                } else {
-                  lat += offsetM * LAT_PER_M;
-                }
-              }
-            }
-
+            const lat = (useParquetCoords && h?.lat != null) ? h.lat : d.lat;
+            const lon = (useParquetCoords && h?.lon != null) ? h.lon : d.lon;
             return [lon + lonOffset, lat];
           },
           getElevation: (d) => Math.max(0.5, d.value * baseH * heightScale),
@@ -720,7 +736,7 @@ export default function DegreeHoursMap({ metadataData }) {
           stroked: false,
           pickable: true,
           updateTriggers: {
-            getPosition:  [useParquetCoords, pointHeights, lonOffset, explodedView, spreadPositions, leanScale, buildingCentroids],
+            getPosition:  [useParquetCoords, pointHeights, lonOffset],
             getElevation: [baseH, heightScale],
             getFillColor: [maxValue],
           },
@@ -730,32 +746,45 @@ export default function DegreeHoursMap({ metadataData }) {
 
     return ls;
   }, [
+    buildingView, buildingDhValues, buildingMaxValue, activeBuildingCutoff,
     showBuildings, buildingWireframe, buildings3D,
     selectedFields, fieldCache,
     heightScale, radius, maxValue, baseH,
     activeCutoff,
     useParquetCoords, pointHeights,
-    explodedView, spreadPositions, leanScale,
   ]);
 
   // ── Tooltip ──
   const getTooltip = useCallback(({ object, layer }) => {
     if (!object) return null;
+    const tooltipStyle = {
+      background: "#1a1f2e",
+      border: "1px solid #3d4555",
+      borderRadius: "6px",
+      padding: "8px 12px",
+      fontSize: "12px",
+      fontFamily: "monospace",
+      pointerEvents: "none",
+    };
+    if (layer?.id === "dh-buildings-view") {
+      const bid = object.properties?.lm_building_id;
+      const val = buildingDhValues[bid];
+      if (val == null) return null;
+      if (activeBuildingCutoff !== null && val > activeBuildingCutoff) return null;
+      const field = selectedFields[0];
+      const meta = FIELD_META[field] ?? { label: field ?? "", unit: "°h" };
+      return {
+        html: `<strong style="color:#e0e0e0">${bid}</strong><br/><span style="color:#8b949e">${meta.label} — building avg</span><br/><span style="color:#E9C46A;font-size:13px"><strong>${val.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${meta.unit}</strong></span>`,
+        style: tooltipStyle,
+      };
+    }
     const field = layer?.id?.replace("dh-", "");
     const meta = FIELD_META[field] ?? { label: field, unit: "" };
     return {
       html: `<strong style="color:#e0e0e0">${object.sensor_id}</strong><br/><span style="color:#8b949e">${meta.label}</span><br/><span style="color:#E9C46A;font-size:13px"><strong>${object.value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${meta.unit}</strong></span>`,
-      style: {
-        background: "#1a1f2e",
-        border: "1px solid #3d4555",
-        borderRadius: "6px",
-        padding: "8px 12px",
-        fontSize: "12px",
-        fontFamily: "monospace",
-        pointerEvents: "none",
-      },
+      style: tooltipStyle,
     };
-  }, []);
+  }, [buildingDhValues, selectedFields, activeBuildingCutoff]);
 
   const toggleField = (f) => {
     setSelectedFields((prev) =>
@@ -932,25 +961,47 @@ export default function DegreeHoursMap({ metadataData }) {
             ⬡ Wire
           </button>
         )}
-
-        {/* Exploded building view */}
-        <div style={s.controlGroup}>
-          <button
-            onClick={() => setExplodedView((v) => !v)}
-            style={{
-              ...s.btn,
-              borderColor: explodedView ? "#FF6B9D" : "#3d4555",
-              color: explodedView ? "#FF6B9D" : "#8b949e",
-              background: explodedView ? "#FF6B9D22" : "none",
-            }}
-            title="Spread sensors evenly within building footprint and lean outward by floor">
-            {spreadLoading ? "⟳ Loading…" : "⬡ Explode"}
-          </button>
-          <span style={s.label}>lean {leanScale}m/fl</span>
-          <input type="range" min={0} max={20} step={0.5} value={leanScale}
-            onChange={(e) => setLeanScale(Number(e.target.value))}
-            style={{ width: 80, accentColor: "#FF6B9D", cursor: "pointer" }} />
-        </div>
+        <button
+          onClick={() => setBuildingView((v) => !v)}
+          title="Color whole building bodies by per-building degree-hour average (outlier filter applied)"
+          style={{
+            ...s.btn,
+            borderColor: buildingView ? "#E9C46A" : "#3d4555",
+            color: buildingView ? "#E9C46A" : "#8b949e",
+            background: buildingView ? "#E9C46A22" : "none",
+          }}
+        >
+          ⬛ Bldg avg
+        </button>
+        {buildingView && (
+          <div style={s.controlGroup}>
+            <button
+              onClick={() => setBuildingOutlierActive((v) => !v)}
+              style={{
+                ...s.btn,
+                borderColor: buildingOutlierActive ? "#f85149" : "#3d4555",
+                color: buildingOutlierActive ? "#f85149" : "#8b949e",
+                background: buildingOutlierActive ? "#f8514922" : "none",
+              }}
+              title="Hide buildings whose average exceeds this value and recalculate the color scale"
+            >
+              ⚠ Bldg cutoff
+            </button>
+            <input
+              value={buildingOutlierInput}
+              onChange={(e) => setBuildingOutlierInput(e.target.value)}
+              onBlur={applyBuildingOutlierInput}
+              onKeyDown={(e) => e.key === "Enter" && applyBuildingOutlierInput()}
+              style={{ ...s.numInput, width: 60 }}
+              placeholder="value"
+            />
+            {buildingOutlierActive && buildingOutlierCount > 0 && (
+              <span style={{ fontSize: 10, color: "#f85149" }}>
+                {buildingOutlierCount} hidden
+              </span>
+            )}
+          </div>
+        )}
 
         <div style={s.sep} />
 
@@ -1199,6 +1250,7 @@ export default function DegreeHoursMap({ metadataData }) {
             {selectedFields.length === 1 && (
               <div style={{ fontSize: 13, color: "#8b949e", marginBottom: 6 }}>
                 {FIELD_META[selectedFields[0]]?.label ?? selectedFields[0]}
+                {buildingView && <span style={{ color: "#E9C46A", marginLeft: 6 }}>— building avg</span>}
               </div>
             )}
             {/* Color bar */}
@@ -1206,11 +1258,19 @@ export default function DegreeHoursMap({ metadataData }) {
               width: 210, height: 14, borderRadius: 4,
               background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})`,
             }} />
-            <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
-              <span>0 °h</span>
-              <span>{Math.round(maxValue / 2).toLocaleString()} °h</span>
-              <span>{Math.round(maxValue).toLocaleString()} °h</span>
-            </div>
+            {buildingView ? (
+              <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
+                <span>0 °h</span>
+                <span>{Math.round(buildingMaxValue / 2).toLocaleString()} °h</span>
+                <span>{Math.round(buildingMaxValue).toLocaleString()} °h</span>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", width: 210, marginTop: 3, fontSize: 13, color: "#8b949e" }}>
+                <span>0 °h</span>
+                <span>{Math.round(maxValue / 2).toLocaleString()} °h</span>
+                <span>{Math.round(maxValue).toLocaleString()} °h</span>
+              </div>
+            )}
 
             {selectedFields.length > 1 && (
               <div style={{ marginTop: 7, display: "flex", gap: 8, flexWrap: "wrap" }}>
