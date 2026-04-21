@@ -590,7 +590,7 @@ export default function DegreeHoursMap({ metadataData }) {
   // ── Effective cutoff (null = no filtering) ──
   const activeCutoff = outlierActive && outlierCutoff != null ? outlierCutoff : null;
 
-  // ── Max value across ALL loaded fields — keeps color scale fixed when comparing years ──
+  // ── Global max across ALL loaded sensor data — fixed scale for year comparison ──
   const globalMaxValue = useMemo(() => {
     let max = 0;
     Object.values(fieldCache).forEach((data) => {
@@ -602,6 +602,26 @@ export default function DegreeHoursMap({ metadataData }) {
     });
     return max || 1;
   }, [fieldCache, activeCutoff]);
+
+  // ── Global max across ALL loaded building averages — fixed scale for building view ──
+  const globalBuildingMaxValue = useMemo(() => {
+    let max = 0;
+    Object.values(fieldCache).forEach((data) => {
+      if (!data?.length) return;
+      const groups = {};
+      data.forEach((d) => {
+        const bid = d.lm_building_id;
+        if (!bid) return;
+        if (!groups[bid]) groups[bid] = [];
+        groups[bid].push(d.value);
+      });
+      Object.values(groups).forEach((vals) => {
+        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+        if (avg > max) max = avg;
+      });
+    });
+    return max || 1;
+  }, [fieldCache]);
 
   // ── Max value for color/height scale (respects outlier filter) ──
   const maxValue = useMemo(() => {
@@ -706,7 +726,7 @@ export default function DegreeHoursMap({ metadataData }) {
             const val = buildingDhValues[bid];
             if (val == null) return [45, 60, 90, 70];
             if (activeBuildingCutoff !== null && val > activeBuildingCutoff) return [45, 60, 90, 40];
-            return [...dhToColor(val, globalMaxValue), 230];
+            return [...dhToColor(val, globalBuildingMaxValue), 230];
           },
           getLineColor: [0, 0, 0, 0],
           lineWidthMinPixels: 0,
@@ -763,7 +783,7 @@ export default function DegreeHoursMap({ metadataData }) {
           updateTriggers: {
             getPosition:  [useParquetCoords, pointHeights],
             getElevation: [baseH, heightScale],
-            getFillColor: [globalMaxValue],
+            getFillColor: [buildingView ? globalBuildingMaxValue : globalMaxValue],
           },
         })
       );
@@ -774,7 +794,7 @@ export default function DegreeHoursMap({ metadataData }) {
     buildingView, buildingDhValues, buildingMaxValue, activeBuildingCutoff,
     showBuildings, buildingWireframe, buildings3D,
     selectedFields, fieldCache,
-    heightScale, radius, maxValue, globalMaxValue, baseH,
+    heightScale, radius, maxValue, globalMaxValue, globalBuildingMaxValue, baseH,
     activeCutoff,
     useParquetCoords, pointHeights,
   ]);
@@ -902,8 +922,8 @@ export default function DegreeHoursMap({ metadataData }) {
             background: `linear-gradient(to right, ${DH_COLOR_STOPS.map((c) => `rgb(${c.join(",")})`).join(",")})` }} />
           <div style={{ display: "flex", justifyContent: "space-between", width: 180, marginTop: 2, fontSize: 10, color: "#556677" }}>
             <span>0</span>
-            <span>{Math.round(globalMaxValue / 2).toLocaleString()}</span>
-            <span>{Math.round(globalMaxValue).toLocaleString()} °h</span>
+            <span>{Math.round((buildingView ? globalBuildingMaxValue : globalMaxValue) / 2).toLocaleString()}</span>
+            <span>{Math.round(buildingView ? globalBuildingMaxValue : globalMaxValue).toLocaleString()} °h</span>
           </div>
           {selectedFields.length > 1 && (
             <div style={{ marginTop: 5, display: "flex", gap: 6, flexWrap: "wrap" }}>
