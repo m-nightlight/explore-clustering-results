@@ -3,6 +3,7 @@ import DeckGL from "@deck.gl/react";
 import { ColumnLayer, GeoJsonLayer } from "@deck.gl/layers";
 import { WebMercatorViewport } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
+import { CommandChip, Popover, PopLabel, PopRow, PopDivider, ChipBtn, ToggleChip } from "./components/CommandStrip.jsx";
 
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
@@ -165,6 +166,8 @@ export default function DegreeHoursMap({ metadataData }) {
   const [openPopover, setOpenPopover]     = useState(null);
   const [presentMode, setPresentMode]     = useState(false);
   const popoverRef                        = useRef(null);
+  const deckRef                           = useRef(null);
+  const mapRef                            = useRef(null);
   const holdTimerRef                      = useRef(null);
   const transitionTimerRef                = useRef(null);
 
@@ -874,6 +877,52 @@ export default function DegreeHoursMap({ metadataData }) {
     return () => document.removeEventListener("mousedown", handler);
   }, [openPopover]);
 
+  const exportImage = useCallback((scale = 1) => {
+    const deck = deckRef.current?.deck;
+    const map  = mapRef.current;
+    if (!deck) return;
+
+    // Never change useDevicePixels on the live canvas — resizing it mid-cycle
+    // causes "drawing to destination smaller than viewport" WebGL errors and
+    // blanks the layers. The deck.gl canvas is already at devicePixelRatio × CSS
+    // pixels (2× on retina), which is the native high-res source. The scale
+    // multiplier soft-upscales the output via the 2D canvas instead.
+    const composite = () => {
+      const deckCanvas = deck.canvas;
+      const srcW = deckCanvas.width;
+      const srcH = deckCanvas.height;
+      const outW = Math.round(srcW * scale);
+      const outH = Math.round(srcH * scale);
+      const out = document.createElement("canvas");
+      out.width = outW;
+      out.height = outH;
+      const ctx = out.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      // DOM query is more reliable than a ref on <Map> inside DeckGL's child tree.
+      const mapCanvas = deckCanvas.parentElement?.querySelector(".mapboxgl-canvas");
+      if (mapCanvas) {
+        try { ctx.drawImage(mapCanvas, 0, 0, outW, outH); } catch { /* tainted — skip */ }
+      }
+      ctx.drawImage(deckCanvas, 0, 0, outW, outH);
+      out.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `degree-hours-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }, "image/png");
+    };
+
+    if (map) {
+      map.once("render", composite);
+      map.triggerRepaint();
+    } else {
+      requestAnimationFrame(composite);
+    }
+  }, []);
+
   const s = styles;
 
   return (
@@ -908,6 +957,7 @@ export default function DegreeHoursMap({ metadataData }) {
 
       {/* DeckGL fills everything */}
       <DeckGL
+        ref={deckRef}
         viewState={viewState}
         onViewStateChange={handleViewStateChange}
         controller={{ maxPitch: 85 }}
@@ -915,9 +965,11 @@ export default function DegreeHoursMap({ metadataData }) {
         getTooltip={getTooltip}
       >
         <Map
+          ref={mapRef}
           key={mapStyleId}
           mapStyle={resolveStyle(MAP_STYLES.find((ms) => ms.id === mapStyleId).url)}
           mapboxAccessToken={MAPBOX_TOKEN}
+          preserveDrawingBuffer={true}
         />
       </DeckGL>
 
@@ -971,9 +1023,23 @@ export default function DegreeHoursMap({ metadataData }) {
 
           {/* Title block */}
           <div style={{ background: "rgba(16,20,28,0.92)", backdropFilter: "blur(12px)",
-            border: "1px solid #2e3440", borderRadius: 6, padding: "5px 10px", flexShrink: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#e6edf3" }}>Degree Hours</div>
-            <div style={{ fontSize: 9, color: "#3d4555", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 1 }}>
+            border: "1px solid #2e3440", borderRadius: 6, padding: "5px 10px", flexShrink: 0,
+            display: "flex", flexDirection: "column", gap: 3 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#e6edf3" }}>Degree Hours</div>
+              <div style={{ display: "flex", gap: 3 }}>
+                {[2, 3, 4].map((scale) => (
+                  <button key={scale} onClick={() => exportImage(scale)} title={`Export ${scale}× PNG`} style={{
+                    background: "none", border: "1px solid #3d4555", borderRadius: 3,
+                    color: "#556677", cursor: "pointer", fontSize: 9, fontFamily: "monospace",
+                    padding: "1px 5px", lineHeight: 1.4,
+                  }}>
+                    {scale}×
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ fontSize: 9, color: "#3d4555", textTransform: "uppercase", letterSpacing: 0.6 }}>
               {selectedFields.map((f) => FIELD_SHORT[f] ?? f).join(" · ") || "—"}
               {outlierActive && outlierCutoff != null ? ` · ⚠${outlierCutoff}` : ""}
             </div>
@@ -1446,113 +1512,5 @@ const styles = {
   },
 };
 
-// ─── Helper UI components (used only in DegreeHoursMap) ───────────
 
-function CommandChip({ label, value, active, onClick }) {
-  return (
-    <button onClick={onClick} style={{
-      background: active ? "rgba(76,201,240,0.12)" : "rgba(16,20,28,0.92)",
-      backdropFilter: "blur(12px)",
-      border: `1px solid ${active ? "#4CC9F0" : "#2e3440"}`,
-      borderRadius: 6,
-      color: active ? "#4CC9F0" : "#c9d1d9",
-      cursor: "pointer",
-      fontSize: 11,
-      fontFamily: "monospace",
-      padding: "5px 11px",
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "flex-start",
-      gap: 2,
-      transition: "all 0.12s",
-      whiteSpace: "nowrap",
-    }}>
-      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>{label}</span>
-      {value && <span style={{ fontSize: 9, color: active ? "#88d8f0" : "#556677", letterSpacing: 0.2 }}>{value}</span>}
-    </button>
-  );
-}
-
-function Popover({ children, style }) {
-  return (
-    <div style={{
-      position: "absolute",
-      top: "calc(100% + 4px)",
-      right: 0,
-      background: "rgba(16,20,28,0.97)",
-      backdropFilter: "blur(12px)",
-      border: "1px solid #2e3440",
-      borderRadius: 6,
-      boxShadow: "0 16px 48px rgba(0,0,0,0.65)",
-      padding: "10px 12px",
-      display: "flex",
-      flexDirection: "column",
-      gap: 7,
-      minWidth: 200,
-      zIndex: 30,
-      fontFamily: "monospace",
-      ...style,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function PopLabel({ children }) {
-  return (
-    <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: 0.8, color: "#556677", fontWeight: 600, marginTop: 2 }}>
-      {children}
-    </div>
-  );
-}
-
-function PopRow({ children }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-      {children}
-    </div>
-  );
-}
-
-function PopDivider() {
-  return <div style={{ height: 1, background: "#2e3440", margin: "2px 0" }} />;
-}
-
-function ChipBtn({ children, onClick, disabled, style }) {
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      background: "none",
-      border: "1px solid #3d4555",
-      borderRadius: 4,
-      color: "#8b949e",
-      cursor: disabled ? "default" : "pointer",
-      fontSize: 10,
-      fontFamily: "monospace",
-      padding: "2px 7px",
-      lineHeight: 1.4,
-      ...style,
-    }}>
-      {children}
-    </button>
-  );
-}
-
-function ToggleChip({ active, color, onClick, children }) {
-  return (
-    <button onClick={onClick} style={{
-      background: active ? `${color}22` : "none",
-      border: `1px solid ${active ? color : "#3d4555"}`,
-      borderRadius: 4,
-      color: active ? color : "#8b949e",
-      cursor: "pointer",
-      fontSize: 10,
-      fontFamily: "monospace",
-      padding: "2px 7px",
-      lineHeight: 1.4,
-      transition: "color 0.8s ease, border-color 0.8s ease, background 0.8s ease",
-    }}>
-      {children}
-    </button>
-  );
-}
 

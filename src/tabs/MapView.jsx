@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as d3 from "d3";
 import DeckGL from "@deck.gl/react";
-import { ScatterplotLayer, GeoJsonLayer, LineLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, GeoJsonLayer, LineLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
 import { WebMercatorViewport, FlyToInterpolator, AmbientLight, _SunLight as SunLight, LightingEffect } from "@deck.gl/core";
 import Map from "react-map-gl/mapbox";
@@ -15,6 +15,7 @@ import {
   getClusterColor, SPHERE_GEOMETRY,
 } from "../constants.js";
 import { styles } from "../styles.js";
+import { CommandChip, Popover, PopLabel, PopRow, ChipBtn, ToggleChip } from "../components/CommandStrip.jsx";
 
 function renderStackedBars(canvas, { labels, counts }, title, clusters, viewClusterIds, rotateLabels = false, colorFn = getClusterColor) {
   if (!canvas || !labels.length) return;
@@ -178,6 +179,9 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   });
 
   const [mapStyleId, setMapStyleId] = useState("dark");
+  const [openPopover, setOpenPopover] = useState(null);
+  const cmdStripRef = useRef(null);
+  const [shadowMode, setShadowMode] = useState(false);
   const [boxZoomActive, setBoxZoomActive] = useState(false);
   const [boxRect, setBoxRect] = useState(null);
   const [mode3D, setMode3D] = useState(true);
@@ -322,7 +326,6 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   const [activeFilters, setActiveFilters] = useState({});
   const [minBuildingFloors, setMinBuildingFloors] = useState(0);
   const [filteredIds, setFilteredIds] = useState(null);
-  const [filtersOpen, setFiltersOpen] = useState(false);
 
   useEffect(() => {
     fetchData("/api/filter-options").then(setFilterOptions).catch((e) => console.error("filter-options fetch failed:", e));
@@ -603,6 +606,20 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   const outdoorTemp = useMemo(() => interpOutdoor("temperature"), [interpOutdoor]);
   const outdoorRH   = useMemo(() => interpOutdoor("humidity"),    [interpOutdoor]);
 
+  const groundPolygon = useMemo(() => {
+    if (!metadataData?.length) return null;
+    const lats = metadataData.filter((r) => r.lat != null).map((r) => r.lat);
+    const lons = metadataData.filter((r) => r.lon != null).map((r) => r.lon);
+    if (!lats.length) return null;
+    const pad = 0.012; // ~1 km margin
+    return [[
+      [Math.min(...lons) - pad, Math.min(...lats) - pad],
+      [Math.max(...lons) + pad, Math.min(...lats) - pad],
+      [Math.max(...lons) + pad, Math.max(...lats) + pad],
+      [Math.min(...lons) - pad, Math.max(...lats) + pad],
+    ]];
+  }, [metadataData]);
+
   const lightingEffect = useMemo(() => {
     const alt = sunInfo.altitude; // degrees above horizon
 
@@ -641,16 +658,10 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
       Math.min(255, Math.round(255 + horizonBlend * (dayT * 150 - 175))),       // 255 → 80 → 230
     ];
 
-    // NOTE: _shadow is intentionally omitted. deck.gl v9's experimental shadow
-    // system injects shadow shader code into all layer pipelines and causes
-    // consistent "Bad texture binding for shadow_uShadowMap0" errors on
-    // SimpleMeshLayer and SolidPolygonLayer sublayers that can't be suppressed
-    // at the application level. Directional shading on building faces still works.
-
     const ambientLight = new AmbientLight({ color: ambientColor, intensity: effectiveAmbient });
-    const sunLight = new SunLight({ timestamp: sunTimestampMs, color: sunColor, intensity: sunIntensity });
+    const sunLight = new SunLight({ timestamp: sunTimestampMs, color: sunColor, intensity: sunIntensity, ...(shadowMode && { _shadow: true }) });
     return new LightingEffect({ ambientLight, sunLight });
-  }, [sunInfo, sunTimestampMs, irradiance]);
+  }, [sunInfo, sunTimestampMs, irradiance, shadowMode]);
 
   // ── Sun arc layers (3D sky dome showing today's sun path) ──
   const sunArcLayers = useMemo(() => {
@@ -767,6 +778,16 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
   // ── deck.gl layers ──
   const layers = useMemo(() => {
     const ls = [];
+    if (shadowMode && mode3D && groundPolygon) {
+      ls.push(new SolidPolygonLayer({
+        id: "shadow-ground",
+        data: [{ polygon: groundPolygon }],
+        getPolygon: (d) => d.polygon,
+        getFillColor: [28, 33, 48, 255],
+        extruded: false,
+        material: { ambient: 0.6, diffuse: 0.4, shininess: 0, specularColor: [0, 0, 0] },
+      }));
+    }
     if (mode3D) {
       ls.push(new LineLayer({
         id: "sensor-struts",
@@ -805,7 +826,7 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
         },
         sizeScale: 1,
         pickable: true,
-        material: false, // opt out of shadow system — prevents shadow_uShadowMap0 binding error on hover pick pass
+        material: { ambient: 0.5, diffuse: 0.5, shininess: 20, specularColor: [60, 60, 60] },
         parameters: { depthTest: true },
         updateTriggers: { getColor: [clusters, buildingHighlightIds, clusterGroups, metricColorMap], getScale: [buildingHighlightIds] },
       }));
@@ -902,7 +923,7 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
       }));
     }
     return ls;
-  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, buildingWireframe, wireLineWidth, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors, navigatedBuildingId, selectedBuildings]);
+  }, [sensorLocations, clusters, buildingHighlightIds, buildingGeometry, buildings3D, mode3D, buildingWireframe, wireLineWidth, metricColorMap, showHeatmap, tempPoints, outdoorTempRange, showOutdoorSensors, outdoorSensors, navigatedBuildingId, selectedBuildings, shadowMode, groundPolygon]);
 
   const handleViewStateChange = useCallback(({ viewState: vs, interactionState }) => {
     setViewState({ ...vs });
@@ -996,6 +1017,15 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
 
   // Keep ref in sync so setTimeout callbacks always call the latest closure
   analyseViewRef.current = analyseView;
+
+  useEffect(() => {
+    if (!openPopover) return;
+    const handler = (e) => {
+      if (cmdStripRef.current && !cmdStripRef.current.contains(e.target)) setOpenPopover(null);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [openPopover]);
 
   // Auto-run analysis once on initial load when sensors + selectedK are ready
   const autoAnalysedRef = useRef(false);
@@ -1502,129 +1532,202 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
     <div style={{ display: "flex", flexDirection: wideMap ? "column" : "row", gap: 16, alignItems: "flex-start" }}>
       {/* Map column */}
       <div style={{ flex: wideMap ? "0 0 100%" : "0 0 50%", width: wideMap ? "100%" : undefined }}>
-        {/* Toolbar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
-          <p style={{ ...styles.mapInfo, margin: 0 }}>{sensorLocations.length.toLocaleString()} sensors • {visibleSensors.length.toLocaleString()} in view</p>
-          <button onClick={() => setFiltersOpen((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: activeFilterCount > 0 ? "#2a9d8f" : "#3d4555", color: activeFilterCount > 0 ? "#2a9d8f" : "#8b949e", background: activeFilterCount > 0 ? "#2a9d8f22" : "none" }}>
-            ⧉ Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-          </button>
-          <button onClick={() => setBoxZoomActive((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: boxZoomActive ? "#f4a261" : "#3d4555", color: boxZoomActive ? "#f4a261" : "#8b949e", background: boxZoomActive ? "#f4a26122" : "none" }}>
-            ⬚ Box zoom
-          </button>
-          <button onClick={analyseView} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#457B9D", color: "#457B9D" }}>
-            Analyse view
-          </button>
-          {selectedBuildings.size > 0 && (
-            <button
-              onClick={() => {
-                const bid = [...selectedBuildings][0];
-                pendingBuildingSelectRef.current = bid;
-                analyseView();
-              }}
-              style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: "#FFB950", color: "#FFB950", background: "#FFB95011" }}
-            >
-              ⬡ Analyse building
-            </button>
-          )}
-          {analysedSensors && outdoorClimateVals && (
-            <button onClick={() => setShowOutdoorOverlay(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorOverlay ? "#ff8a65" : "#3d4555", color: showOutdoorOverlay ? "#ff8a65" : "#8b949e", background: showOutdoorOverlay ? "#ff8a6522" : "none" }}>
-              🌡 Outdoor temp
-            </button>
-          )}
-          {outdoorSensors?.length > 0 && (
-            <>
-              <button onClick={() => setShowOutdoorSensors((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showOutdoorSensors ? "#ff8c00" : "#3d4555", color: showOutdoorSensors ? "#ff8c00" : "#8b949e", background: showOutdoorSensors ? "#ff8c0022" : "none" }}>
-                ◉ Outdoor
-              </button>
-              <button onClick={() => setShowHeatmap((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showHeatmap ? "#e63946" : "#3d4555", color: showHeatmap ? "#e63946" : "#8b949e", background: showHeatmap ? "#e6394622" : "none" }}>
-                ▦ Heatmap
-              </button>
-            </>
-          )}
-          {analysedSensors && (
-            <button onClick={() => setTallPlots(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: tallPlots ? "#58a6ff" : "#3d4555", color: tallPlots ? "#58a6ff" : "#8b949e", background: tallPlots ? "#58a6ff22" : "none" }}>
-              ⇕ Tall plots
-            </button>
-          )}
-          {analysedSensors && (
-            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
-              <button onClick={zoomIn} title="Zoom in (2×, centered on playhead)" style={{ ...styles.miniBtn, padding: "4px 9px", fontSize: 13 }}>+</button>
-              <button onClick={zoomOut} disabled={!xZoom} title="Zoom out (2×)" style={{ ...styles.miniBtn, padding: "4px 9px", fontSize: 13, opacity: xZoom ? 1 : 0.4 }}>−</button>
-              {xZoom && <button onClick={() => setXZoom(null)} title="Reset zoom" style={{ ...styles.miniBtn, padding: "4px 8px", fontSize: 11, borderColor: "#E9C46A", color: "#E9C46A", background: "#E9C46A22" }}>✕</button>}
-            </span>
-          )}
-          {analysedSensors && allClusterProfiles?.timestamps?.length > 0 && (() => {
-            const ts = allClusterProfiles.timestamps;
-            const n = ts.length;
-            const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
-            const inputStyle = { background: "#1a1f2e", border: "1px solid #3d4555", borderRadius: 4, color: "#c9d1d9", fontSize: 10, padding: "2px 4px", colorScheme: "dark", cursor: "pointer" };
-            return (
-              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <input type="date"
-                  value={ts[lo]?.slice(0, 10) ?? ""}
-                  min={ts[0]?.slice(0, 10)}
-                  max={ts[hi - 1]?.slice(0, 10)}
-                  style={inputStyle}
-                  onChange={(e) => {
-                    const idx = dateToIdx(e.target.value);
-                    const newHi = xZoom?.hi ?? (n - 1);
-                    const newLo = Math.min(idx, newHi - 1);
-                    setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi });
-                  }}
-                />
-                <span style={{ color: "#556677", fontSize: 10 }}>–</span>
-                <input type="date"
-                  value={ts[hi]?.slice(0, 10) ?? ""}
-                  min={ts[lo + 1]?.slice(0, 10)}
-                  max={ts[n - 1]?.slice(0, 10)}
-                  style={inputStyle}
-                  onChange={(e) => {
-                    const idx = dateToIdx(e.target.value);
-                    const newLo = xZoom?.lo ?? 0;
-                    const newHi = Math.max(idx, newLo + 1);
-                    setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi });
-                  }}
-                />
-              </span>
-            );
-          })()}
-          <button onClick={toggle3D} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: mode3D ? "#E9C46A" : "#3d4555", color: mode3D ? "#E9C46A" : "#8b949e", background: mode3D ? "#E9C46A22" : "none" }}>
-            ⬡ 3D{Object.keys(pointHeights).length === 0 ? " (loading…)" : ""}
-          </button>
-          {mode3D && (
-            <button onClick={() => setShowSunArc(v => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: showSunArc ? "#E9C46A" : "#3d4555", color: showSunArc ? "#E9C46A" : "#8b949e", background: showSunArc ? "#E9C46A22" : "none" }}>
-              ☀ Sun arc
-            </button>
-          )}
-          {mode3D && (
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <button onClick={() => setBuildingWireframe(v => !v)} title="Toggle building wireframe" style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: buildingWireframe ? "#88AADD" : "#3d4555", color: buildingWireframe ? "#88AADD" : "#8b949e", background: buildingWireframe ? "#88AADD22" : "none" }}>
-                ⬡ Wire
-              </button>
-              {buildingWireframe && (
-                <input
-                  type="range" min={0.5} max={4} step={0.5}
-                  value={wireLineWidth}
-                  onChange={(e) => setWireLineWidth(parseFloat(e.target.value))}
-                  title={`Line width: ${wireLineWidth}px`}
-                  style={{ width: 54, accentColor: "#88AADD", cursor: "pointer" }}
-                />
-              )}
+        {/* Command strip */}
+        <div ref={cmdStripRef} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
+          {/* Title block */}
+          <div style={{ background: "rgba(16,20,28,0.92)", backdropFilter: "blur(12px)", border: "1px solid #2e3440", borderRadius: 6, padding: "5px 10px", flexShrink: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#e6edf3", fontFamily: "monospace" }}>Sensor Map</div>
+            <div style={{ fontSize: 9, color: "#3d4555", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 1, fontFamily: "monospace" }}>
+              {sensorLocations.length.toLocaleString()} sensors · {visibleSensors.length.toLocaleString()} in view
             </div>
-          )}
-          <button onClick={() => setUseParquetCoords((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: useParquetCoords ? "#4CC9F0" : "#3d4555", color: useParquetCoords ? "#4CC9F0" : "#8b949e", background: useParquetCoords ? "#4CC9F022" : "none" }}>
-            ⌖ Parquet coords
-          </button>
-          <button onClick={() => setWideMap((v) => !v)} style={{ ...styles.miniBtn, padding: "4px 12px", fontSize: 11, borderColor: wideMap ? "#58a6ff" : "#3d4555", color: wideMap ? "#58a6ff" : "#8b949e", background: wideMap ? "#58a6ff22" : "none" }}>
-            ⛶ Wide
-          </button>
-          <select
-            value={mapStyleId}
-            onChange={(e) => setMapStyleId(e.target.value)}
-            style={{ ...styles.select, padding: "3px 8px", fontSize: 11 }}
-          >
-            {MAP_STYLES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {/* View chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="View"
+              value={[wideMap && "Wide", analysedSensors && tallPlots && "Tall", useParquetCoords && "⌖ Parquet"].filter(Boolean).join(" · ") || "—"}
+              active={openPopover === "view"}
+              onClick={() => setOpenPopover(openPopover === "view" ? null : "view")}
+            />
+            {openPopover === "view" && (
+              <Popover>
+                <PopLabel>Layout</PopLabel>
+                <PopRow>
+                  <ToggleChip active={wideMap} color="#58a6ff" onClick={() => setWideMap((v) => !v)}>⛶ Wide</ToggleChip>
+                  {analysedSensors && <ToggleChip active={tallPlots} color="#58a6ff" onClick={() => setTallPlots((v) => !v)}>⇕ Tall plots</ToggleChip>}
+                </PopRow>
+                <PopLabel>Coords</PopLabel>
+                <PopRow>
+                  <ToggleChip active={useParquetCoords} color="#4CC9F0" onClick={() => setUseParquetCoords((v) => !v)}>⌖ Parquet coords</ToggleChip>
+                </PopRow>
+              </Popover>
+            )}
+          </div>
+
+          {/* Layers chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Layers"
+              value={[
+                mode3D && "3D",
+                mode3D && showSunArc && "☀",
+                mode3D && shadowMode && "Shad",
+                mode3D && buildingWireframe && "Wire",
+                showOutdoorSensors && "◉",
+                showHeatmap && "▦",
+              ].filter(Boolean).join(" · ") || "—"}
+              active={openPopover === "layers"}
+              onClick={() => setOpenPopover(openPopover === "layers" ? null : "layers")}
+            />
+            {openPopover === "layers" && (
+              <Popover>
+                <PopLabel>3D</PopLabel>
+                <PopRow>
+                  <ToggleChip active={mode3D} color="#E9C46A" onClick={toggle3D}>
+                    ⬡ 3D{Object.keys(pointHeights).length === 0 ? " …" : ""}
+                  </ToggleChip>
+                  {mode3D && <ToggleChip active={showSunArc} color="#E9C46A" onClick={() => setShowSunArc((v) => !v)}>☀ Sun arc</ToggleChip>}
+                  {mode3D && <ToggleChip active={shadowMode} color="#C8B6FF" onClick={() => setShadowMode((v) => !v)}>◈ Shadows</ToggleChip>}
+                </PopRow>
+                {mode3D && (
+                  <>
+                    <PopLabel>Buildings</PopLabel>
+                    <PopRow>
+                      <ToggleChip active={buildingWireframe} color="#88AADD" onClick={() => setBuildingWireframe((v) => !v)}>⬡ Wire</ToggleChip>
+                      {buildingWireframe && (
+                        <input type="range" min={0.5} max={4} step={0.5} value={wireLineWidth}
+                          onChange={(e) => setWireLineWidth(parseFloat(e.target.value))}
+                          style={{ width: 64, accentColor: "#88AADD", cursor: "pointer" }} />
+                      )}
+                    </PopRow>
+                  </>
+                )}
+                {outdoorSensors?.length > 0 && (
+                  <>
+                    <PopLabel>Outdoor sensors</PopLabel>
+                    <PopRow>
+                      <ToggleChip active={showOutdoorSensors} color="#ff8c00" onClick={() => setShowOutdoorSensors((v) => !v)}>◉ Outdoor</ToggleChip>
+                      <ToggleChip active={showHeatmap} color="#e63946" onClick={() => setShowHeatmap((v) => !v)}>▦ Heatmap</ToggleChip>
+                    </PopRow>
+                  </>
+                )}
+                <PopLabel>Map style</PopLabel>
+                <PopRow>
+                  <select value={mapStyleId} onChange={(e) => setMapStyleId(e.target.value)}
+                    style={{ background: "#1a1f2e", border: "1px solid #3d4555", borderRadius: 4, color: "#c9d1d9", fontSize: 10, padding: "2px 6px", fontFamily: "monospace", cursor: "pointer" }}>
+                    {MAP_STYLES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </PopRow>
+              </Popover>
+            )}
+          </div>
+
+          {/* Filter chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Filter"
+              value={activeFilterCount > 0 ? `${activeFilterCount} active` : "—"}
+              active={openPopover === "filter" || activeFilterCount > 0}
+              onClick={() => setOpenPopover(openPopover === "filter" ? null : "filter")}
+            />
+            {openPopover === "filter" && filterOptions && (
+              <Popover style={{ minWidth: 240, maxHeight: 380, overflowY: "auto" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <PopLabel>Filters</PopLabel>
+                  {activeFilterCount > 0 && <ChipBtn onClick={clearFilters} style={{ color: "#f85149", borderColor: "#f85149" }}>Clear all</ChipBtn>}
+                </div>
+                <PopLabel>Min building floors</PopLabel>
+                <PopRow>
+                  {[0, 2, 3, 4, 5, 6].map((n) => (
+                    <ChipBtn key={n} onClick={() => setMinBuildingFloors(n)}
+                      style={{ borderColor: minBuildingFloors === n ? "#2a9d8f" : "#3d4555", color: minBuildingFloors === n ? "#2a9d8f" : "#8b949e", background: minBuildingFloors === n ? "#2a9d8f22" : "none" }}>
+                      {n === 0 ? "Any" : `${n}+`}
+                    </ChipBtn>
+                  ))}
+                </PopRow>
+                {Object.entries(filterOptions).map(([field, values]) => (
+                  <div key={field}>
+                    <PopLabel>{field}</PopLabel>
+                    <PopRow>
+                      {values.map((v) => {
+                        const isActive = activeFilters[field]?.has(String(v));
+                        return (
+                          <ChipBtn key={v} onClick={() => toggleFilterValue(field, String(v))}
+                            style={{ borderColor: isActive ? "#2a9d8f" : "#3d4555", color: isActive ? "#2a9d8f" : "#8b949e", background: isActive ? "#2a9d8f22" : "none" }}>
+                            {v}
+                          </ChipBtn>
+                        );
+                      })}
+                    </PopRow>
+                  </div>
+                ))}
+              </Popover>
+            )}
+          </div>
+
+          {/* Analysis chip */}
+          <div style={{ position: "relative" }}>
+            <CommandChip
+              label="Analysis"
+              value={analysedSensors ? `${analysedSensors.length} sensors` : "—"}
+              active={openPopover === "analysis"}
+              onClick={() => setOpenPopover(openPopover === "analysis" ? null : "analysis")}
+            />
+            {openPopover === "analysis" && (
+              <Popover>
+                <PopLabel>Tools</PopLabel>
+                <PopRow>
+                  <ChipBtn onClick={analyseView} style={{ borderColor: "#457B9D", color: "#457B9D" }}>Analyse view</ChipBtn>
+                  <ToggleChip active={boxZoomActive} color="#f4a261" onClick={() => setBoxZoomActive((v) => !v)}>⬚ Box zoom</ToggleChip>
+                </PopRow>
+                {selectedBuildings.size > 0 && (
+                  <>
+                    <PopLabel>Building</PopLabel>
+                    <PopRow>
+                      <ChipBtn onClick={() => { const bid = [...selectedBuildings][0]; pendingBuildingSelectRef.current = bid; analyseView(); }}
+                        style={{ borderColor: "#FFB950", color: "#FFB950" }}>
+                        ⬡ Analyse building
+                      </ChipBtn>
+                    </PopRow>
+                  </>
+                )}
+                {analysedSensors && outdoorClimateVals && (
+                  <>
+                    <PopLabel>Overlays</PopLabel>
+                    <PopRow>
+                      <ToggleChip active={showOutdoorOverlay} color="#ff8a65" onClick={() => setShowOutdoorOverlay((v) => !v)}>🌡 Outdoor temp</ToggleChip>
+                    </PopRow>
+                  </>
+                )}
+                {analysedSensors && allClusterProfiles?.timestamps?.length > 0 && (() => {
+                  const ts = allClusterProfiles.timestamps;
+                  const n = ts.length;
+                  const lo = xZoom?.lo ?? 0, hi = xZoom?.hi ?? (n - 1);
+                  const inputStyle = { background: "#1a1f2e", border: "1px solid #3d4555", borderRadius: 4, color: "#c9d1d9", fontSize: 10, padding: "2px 4px", colorScheme: "dark", cursor: "pointer" };
+                  return (
+                    <>
+                      <PopLabel>Time zoom</PopLabel>
+                      <PopRow>
+                        <ChipBtn onClick={zoomIn}>+</ChipBtn>
+                        <ChipBtn onClick={zoomOut} disabled={!xZoom} style={{ opacity: xZoom ? 1 : 0.4 }}>−</ChipBtn>
+                        {xZoom && <ChipBtn onClick={() => setXZoom(null)} style={{ borderColor: "#E9C46A", color: "#E9C46A" }}>✕ reset</ChipBtn>}
+                      </PopRow>
+                      <PopRow>
+                        <input type="date" value={ts[lo]?.slice(0, 10) ?? ""} min={ts[0]?.slice(0, 10)} max={ts[hi - 1]?.slice(0, 10)} style={inputStyle}
+                          onChange={(e) => { const idx = dateToIdx(e.target.value); const newHi = xZoom?.hi ?? (n - 1); const newLo = Math.min(idx, newHi - 1); setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi }); }} />
+                        <span style={{ color: "#556677", fontSize: 10 }}>–</span>
+                        <input type="date" value={ts[hi]?.slice(0, 10) ?? ""} min={ts[lo + 1]?.slice(0, 10)} max={ts[n - 1]?.slice(0, 10)} style={inputStyle}
+                          onChange={(e) => { const idx = dateToIdx(e.target.value); const newLo = xZoom?.lo ?? 0; const newHi = Math.max(idx, newLo + 1); setXZoom(newLo <= 0 && newHi >= n - 1 ? null : { lo: newLo, hi: newHi }); }} />
+                      </PopRow>
+                    </>
+                  );
+                })()}
+              </Popover>
+            )}
+          </div>
         </div>
 
         {/* Sun time scrubber + playback controls — only shown in 3D mode */}
@@ -1672,47 +1775,7 @@ export default function MapView({ metadataData, selectedK, clusters, selectedClu
           </div>
         )}
 
-        {/* Filter panel */}
-        {filtersOpen && filterOptions && (
-          <div style={{ marginBottom: 8, padding: "10px 12px", background: "#232936", border: "1px solid #2e3440", borderRadius: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: "#8b949e", textTransform: "uppercase", letterSpacing: "0.5px" }}>Filter sensors</span>
-              {activeFilterCount > 0 && <button onClick={clearFilters} style={{ ...styles.miniBtn, fontSize: 10, color: "#f85149", borderColor: "#f85149" }}>Clear all</button>}
-            </div>
-            {/* Building floor count filter */}
-            <div style={{ marginBottom: 8, paddingBottom: 8, borderBottom: "1px solid #2e3440" }}>
-              <div style={{ fontSize: 10, color: "#8b949e", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.4px" }}>Min building floors</div>
-              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                {[0, 2, 3, 4, 5, 6].map((n) => (
-                  <button key={n} onClick={() => setMinBuildingFloors(n)}
-                    style={{ ...styles.sensorChip, fontSize: 10, padding: "2px 8px",
-                      backgroundColor: minBuildingFloors === n ? "#2a9d8f33" : "transparent",
-                      borderColor: minBuildingFloors === n ? "#2a9d8f" : "#3d4555",
-                      color: minBuildingFloors === n ? "#2a9d8f" : "#8b949e" }}>
-                    {n === 0 ? "Any" : `${n}+`}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 220, overflowY: "auto" }}>
-              {Object.entries(filterOptions).map(([field, values]) => (
-                <div key={field}>
-                  <div style={{ fontSize: 10, color: "#8b949e", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.4px" }}>{field}</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {values.map((v) => {
-                      const active = activeFilters[field]?.has(String(v));
-                      return (
-                        <button key={v} onClick={() => toggleFilterValue(field, String(v))} style={{ ...styles.sensorChip, fontSize: 10, padding: "2px 8px", backgroundColor: active ? "#2a9d8f33" : "transparent", borderColor: active ? "#2a9d8f" : "#3d4555", color: active ? "#2a9d8f" : "#8b949e" }}>
-                          {v}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+
 
         {/* DeckGL map + sun intensity bar */}
         <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
